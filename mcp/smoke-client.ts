@@ -1,0 +1,3 @@
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+const client=new Client({name:'agent-gate-smoke',version:'0.1.0'});await client.connect(new StdioClientTransport({command:'npx',args:['tsx','mcp/server.ts']}));const {tools}=await client.listTools();const result=await client.callTool({name:'agentgate_list_governed_tools',arguments:{}});const approval=await client.callTool({name:'agentgate_request_email_send',arguments:{to:'demo@example.com',subject:'MCP smoke test',body:'This is a governed test action.'}});console.log(JSON.stringify({toolNames:tools.map(t=>t.name),result,approval},null,2));await client.close();

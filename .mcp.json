@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "agent-gate": {
+      "command": "npx",
+      "args": ["tsx", "mcp/server.ts"],
+      "env": { "AGENT_GATE_API_URL": "http://localhost:3000" }
+    }
+  }
+}
