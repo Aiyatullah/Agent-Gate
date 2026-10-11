@@ -7,6 +7,7 @@ import { RedisService } from './redis.service.js';
 import { RateLimitService } from './rate-limit.service.js';
 import { ProviderService } from './provider.service.js';
 import { MetricsService } from './metrics.service.js';
+import { ApiKeysService } from './api-keys.service.js';
 
 const admin = { sub: 'a1', tenantId: 'tenant-a', role: 'admin' as const, scopes: ['tools:read', 'tools:email:send'] };
 const otherAdmin = { ...admin, tenantId: 'tenant-b' };
@@ -135,5 +136,37 @@ describe('secrets', () => {
     expect(blob).not.toContain('s3cret');
     expect(decryptSecret(blob)).toBe('s3cret');
     expect(() => decryptSecret(blob.replace(/.$/, c => (c === 'A' ? 'B' : 'A')))).toThrow();
+  });
+});
+
+describe('api keys', () => {
+  const agent = { ...admin, role: 'agent' as const };
+
+  it('creates a key shown once, resolves it to its tenant, and revokes it', async () => {
+    const svc = new ApiKeysService();
+    const created = await svc.create(admin, { name: 'CI agent', role: 'agent', scopes: ['tools:read'] });
+    expect(created.key).toMatch(/^agk_/);
+    expect((await svc.list(admin))[0]).not.toHaveProperty('key');
+    expect(JSON.stringify(await svc.list(admin))).not.toContain(created.key);
+    const actor = await svc.resolve(created.key);
+    expect(actor).toMatchObject({ tenantId: 'tenant-a', role: 'agent', scopes: ['tools:read'] });
+    await svc.revoke(admin, created.id);
+    expect(await svc.resolve(created.key)).toBeUndefined();
+  });
+
+  it('is admin-only, tenant-scoped, and never mints admin keys', async () => {
+    const svc = new ApiKeysService();
+    await expect(svc.create(agent, { name: 'x' })).rejects.toThrow(ForbiddenException);
+    await expect(svc.create(admin, { name: 'x', role: 'admin' })).rejects.toThrow(/agent or viewer/);
+    await expect(svc.create(admin, { name: 'x', scopes: ['bad scope!'] })).rejects.toThrow(/Scopes/);
+    const k = await svc.create(admin, { name: 'a' });
+    expect(await svc.list(otherAdmin)).toHaveLength(0);
+    await expect(svc.revoke(otherAdmin, k.id)).rejects.toThrow(NotFoundException);
+  });
+
+  it('still honors static MCP_CLIENTS keys', async () => {
+    process.env.MCP_CLIENTS = JSON.stringify([{ name: 'Static', key: 'static-key', role: 'agent' }]);
+    expect((await new ApiKeysService().resolve('static-key'))?.actorName).toBe('Static');
+    delete process.env.MCP_CLIENTS;
   });
 });

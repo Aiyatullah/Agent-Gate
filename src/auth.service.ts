@@ -1,10 +1,11 @@
-import { Injectable, OnModuleInit, UnauthorizedException } from '@nestjs/common';
+import { Injectable, OnModuleInit, Optional, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { betterAuth } from 'better-auth';
 import { bearer } from 'better-auth/plugins';
 import { getMigrations } from 'better-auth/db/migration';
 import { Pool } from 'pg';
 import { log } from './log.js';
+import { MetricsService } from './metrics.service.js';
 import type { Role } from './app.service.js';
 
 export type Actor = { sub: string; tenantId: string; role: Role; scopes: string[]; actorName?: string; client?: string };
@@ -45,7 +46,7 @@ export function createAuth() {
 export class AuthService implements OnModuleInit {
   readonly auth = createAuth();
 
-  constructor(private readonly jwt: JwtService) {}
+  constructor(private readonly jwt: JwtService, @Optional() private readonly metrics?: MetricsService) {}
 
   async onModuleInit() {
     if (!process.env.DATABASE_URL || process.env.AUTH_AUTO_MIGRATE === 'false') return;
@@ -60,6 +61,11 @@ export class AuthService implements OnModuleInit {
 
   /** Resolves a bearer token (Better Auth session token, or a demo JWT when enabled) to an Actor. */
   async actor(authorization?: string): Promise<Actor> {
+    try { return await this.resolveActor(authorization); }
+    catch (e) { if (e instanceof UnauthorizedException) this.metrics?.inc('agent_gate_auth_failures_total'); throw e; }
+  }
+
+  private async resolveActor(authorization?: string): Promise<Actor> {
     if (!authorization?.startsWith('Bearer ')) throw new UnauthorizedException('A valid bearer token is required.');
     const token = authorization.slice(7);
     if (this.demoEnabled && token.split('.').length === 3) {

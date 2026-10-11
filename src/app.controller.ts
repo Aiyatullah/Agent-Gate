@@ -8,6 +8,7 @@ import { AuthService } from './auth.service.js';
 import { RedisService } from './redis.service.js';
 import { ExecutionService } from './execution.service.js';
 import { MetricsService } from './metrics.service.js';
+import { ApiKeysService } from './api-keys.service.js';
 
 type CreateTool = Omit<Tool, 'id'>;
 type PatchTool = Partial<Pick<Tool, 'status' | 'approvalMode' | 'risk' | 'name' | 'description'>>;
@@ -24,6 +25,7 @@ export class AppController {
     private readonly redis: RedisService,
     private readonly exec: ExecutionService,
     private readonly metrics: MetricsService,
+    private readonly keys: ApiKeysService,
   ) {}
 
   @Get('health')
@@ -35,7 +37,7 @@ export class AppController {
   async metricsText(@Res() res: Response, @Headers('authorization') h?: string) {
     const token = process.env.METRICS_TOKEN;
     if (token && h !== `Bearer ${token}`) throw new UnauthorizedException();
-    res.type('text/plain').send(this.metrics.render());
+    res.type('text/plain; version=0.0.4').send(await this.metrics.render());
   }
 
   @Post('auth/demo-token')
@@ -82,6 +84,21 @@ export class AppController {
   @ApiBearerAuth() @Patch('users/:id/role')
   setRole(@Param('id') id: string, @Body() body: { role: Role }, @Headers('authorization') h?: string) {
     return this.actor(h).then(a => this.service.setUserRole(a, id, body.role));
+  }
+
+  @ApiBearerAuth() @Get('api-keys')
+  listKeys(@Headers('authorization') h?: string) {
+    return this.actor(h).then(a => this.keys.list(a));
+  }
+
+  @ApiBearerAuth() @Post('api-keys')
+  createKey(@Body() body: { name?: string; role?: string; scopes?: string[] }, @Headers('authorization') h?: string) {
+    return this.actor(h).then(a => this.keys.create(a, body ?? {}));
+  }
+
+  @ApiBearerAuth() @Delete('api-keys/:id')
+  revokeKey(@Param('id') id: string, @Headers('authorization') h?: string) {
+    return this.actor(h).then(a => this.keys.revoke(a, id));
   }
 
   @ApiBearerAuth() @Post('tools/:id/calls')

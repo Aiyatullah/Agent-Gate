@@ -2,28 +2,13 @@ import { All, Controller, Req, Res } from '@nestjs/common';
 import { ApiExcludeController } from '@nestjs/swagger';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { createHash, timingSafeEqual } from 'node:crypto';
 import type { Request, Response } from 'express';
 import { z } from 'zod';
 import { AppService } from './app.service.js';
-import { Actor, AuthService, DEFAULT_TENANT } from './auth.service.js';
+import { Actor, AuthService } from './auth.service.js';
+import { ApiKeysService } from './api-keys.service.js';
+import { MetricsService } from './metrics.service.js';
 import { log } from './log.js';
-
-type McpClient = { name: string; key: string; tenantId?: string; role?: Actor['role']; scopes?: string[] };
-
-const sha = (v: string) => createHash('sha256').update(v).digest();
-
-/** Per-client API keys from MCP_CLIENTS (JSON array). Each key maps to a tenant, role, and scopes. */
-function clients(): McpClient[] {
-  try { return JSON.parse(process.env.MCP_CLIENTS ?? '[]') as McpClient[]; } catch { return []; }
-}
-
-export function resolveApiKey(key: string): Actor | undefined {
-  const hit = clients().find(c => c.key && timingSafeEqual(sha(c.key), sha(key)));
-  if (!hit) return undefined;
-  const role = hit.role ?? 'agent';
-  return { sub: `mcp:${hit.name}`, tenantId: hit.tenantId ?? DEFAULT_TENANT, role, scopes: hit.scopes ?? ['tools:read'], actorName: hit.name, client: hit.name };
-}
 
 const text = (v: unknown) => ({ content: [{ type: 'text' as const, text: typeof v === 'string' ? v : JSON.stringify(v, null, 2) }] });
 
@@ -48,13 +33,14 @@ function buildServer(svc: AppService, actor: Actor) {
 @ApiExcludeController()
 @Controller('mcp')
 export class McpHttpController {
-  constructor(private readonly svc: AppService, private readonly auth: AuthService) {}
+  constructor(private readonly svc: AppService, private readonly auth: AuthService, private readonly keys: ApiKeysService, private readonly metrics: MetricsService) {}
 
   @All()
   async handle(@Req() req: Request, @Res() res: Response) {
     const key = (req.headers['x-api-key'] as string | undefined) ?? req.headers.authorization?.replace(/^Bearer /, '');
-    let actor = key ? resolveApiKey(key) : undefined;
+    let actor = key ? await this.keys.resolve(key) : undefined;
     if (!actor && req.headers.authorization) actor = await this.auth.actor(req.headers.authorization).catch(() => undefined);
+    this.metrics.inc('agent_gate_mcp_requests_total', { outcome: actor ? 'authenticated' : 'unauthorized' });
     if (!actor) {
       res.status(401).set('WWW-Authenticate', 'Bearer realm="agent-gate"').json({ jsonrpc: '2.0', error: { code: -32001, message: 'A valid MCP API key or session token is required.' }, id: null });
       return;

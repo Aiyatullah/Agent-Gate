@@ -4,10 +4,11 @@ import { FormEvent, useEffect, useState } from 'react';
 type Tool = { id: string; name: string; slug: string; kind: string; risk: string; scopes: string[]; description: string; status: string; approvalMode: string; endpoint?: string };
 type Audit = { id: string; traceId: string; toolName: string; actorName: string; actorClient: string; inputSummary: string; decision: string; policyReason: string; executionStatus: string; latencyMs: number; createdAt: string };
 type Approval = { id: string; traceId: string; toolName: string; actorName: string; actorClient: string; inputSummary: string; policyReason: string; status: string; executionStatus: string; createdAt: string; approvedBy?: string };
+type ApiKey = { id: string; name: string; prefix: string; role: string; scopes: string[]; createdBy: string; createdAt: string; lastUsedAt?: string | null; revokedAt?: string | null };
 type User = { id: string; name: string; email: string; role: string; status: string; agent: string };
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3000';
-const NAV = ['Overview', 'Tool registry', 'Policies', 'Approvals', 'Audit logs', 'Identities', 'Architecture', 'Usage'];
+const NAV = ['Overview', 'Tool registry', 'Policies', 'Approvals', 'Audit logs', 'Identities', 'API keys', 'Architecture', 'Usage'];
 const POLL_MS = 5000;
 
 const Badge = ({ value }: { value: string }) => (
@@ -28,6 +29,10 @@ export default function Home() {
   const [audit, setAudit] = useState<Audit[]>([]);
   const [approvals, setApprovals] = useState<Approval[]>([]);
   const [users, setUsers] = useState<User[]>([]);
+  const [keys, setKeys] = useState<ApiKey[]>([]);
+  const [keyForm, setKeyForm] = useState(false);
+  const [newKey, setNewKey] = useState<{ name: string; key: string } | null>(null);
+  const [copied, setCopied] = useState(false);
   const [form, setForm] = useState(false);
   const [guide, setGuide] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -42,7 +47,7 @@ export default function Home() {
   const [authMode, setAuthMode] = useState<'in' | 'up'>('in');
   const stored = () => { try { return localStorage.getItem('ag_token'); } catch { return null; } };
 
-  const signOut = () => { try { localStorage.removeItem('ag_token'); } catch { /* ignore */ } setNeedLogin(true); setTools([]); setAudit([]); setApprovals([]); setUsers([]); };
+  const signOut = () => { try { localStorage.removeItem('ag_token'); } catch { /* ignore */ } setNeedLogin(true); setTools([]); setAudit([]); setApprovals([]); setUsers([]); setKeys([]); setNewKey(null); };
 
   const submitAuth = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -77,6 +82,7 @@ export default function Home() {
     try {
       const [t, a, p, u] = await Promise.all([req('/tools'), req('/audit-logs'), req('/approvals'), req('/users')]);
       setTools(t); setAudit(a); setApprovals(p); setUsers(u);
+      setKeys(await req('/api-keys').catch(() => []));
       setLastRefreshed(new Date());
     } catch (e) {
       setNotice(e instanceof Error ? e.message : 'Could not load Agent Gate');
@@ -140,6 +146,25 @@ export default function Home() {
     try {
       await req(`/tools/${id}`, 'DELETE'); setNotice('Tool deleted.'); await load();
     } catch (e) { setNotice(e instanceof Error ? e.message : 'Could not delete tool'); }
+    finally { setBusy(false); }
+  };
+
+  const createKey = async (e: FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const f = new FormData(e.currentTarget);
+    setBusy(true);
+    try {
+      const k = await req('/api-keys', 'POST', { name: f.get('name'), role: f.get('role'), scopes: String(f.get('scopes')).split(',').map(x => x.trim()).filter(Boolean) });
+      setKeyForm(false); setCopied(false); setNewKey({ name: k.name, key: k.key }); await load();
+    } catch (err) { setNotice(err instanceof Error ? err.message : 'Could not create key'); }
+    finally { setBusy(false); }
+  };
+
+  const revokeKey = async (k: ApiKey) => {
+    if (!confirm(`Revoke "${k.name}" (${k.prefix}…)? Clients using it will stop working immediately.`)) return;
+    setBusy(true);
+    try { await req(`/api-keys/${k.id}`, 'DELETE'); setNotice('API key revoked.'); await load(); }
+    catch (err) { setNotice(err instanceof Error ? err.message : 'Could not revoke key'); }
     finally { setBusy(false); }
   };
 
@@ -326,6 +351,44 @@ export default function Home() {
     </div>
   );
 
+  const mcpUrl = `${API}/mcp`;
+  const ApiKeys = (
+    <div className="panel overflow-x-auto">
+      <div className="flex items-center justify-between border-b p-5" style={{ borderColor: 'var(--line)' }}>
+        <div>
+          <p className="text-xl font-semibold">MCP API keys</p>
+          <p style={{ color: 'var(--text-2)' }}>Each key is one agent identity bound to this tenant, a role, and scopes. Keys are shown once and stored only as a hash.</p>
+        </div>
+        <button className="primary" onClick={() => setKeyForm(true)}>Create key</button>
+      </div>
+      <div className="border-b p-4 text-sm" style={{ borderColor: 'var(--line)', color: 'var(--text-2)' }}>
+        Endpoint: <code>{mcpUrl}</code> · send the key as <code>x-api-key</code> or <code>Authorization: Bearer</code>. Keys set in <code>MCP_CLIENTS</code> on the server are not listed here.
+      </div>
+      {keys.length === 0
+        ? <Empty msg="No API keys yet. Create one to connect a remote MCP client." />
+        : (
+          <table className="w-full text-left">
+            <thead style={{ background: 'var(--raised)', color: 'var(--text-3)' }}>
+              <tr><th className="p-4">Name</th><th>Key</th><th>Role</th><th>Scopes</th><th>Last used</th><th>Status</th><th /></tr>
+            </thead>
+            <tbody>
+              {keys.map(k => (
+                <tr key={k.id} className="border-t" style={{ borderColor: 'var(--line)' }}>
+                  <td className="p-4"><b>{k.name}</b><p className="text-xs" style={{ color: 'var(--text-3)' }}>by {k.createdBy} · {fmt(k.createdAt)}</p></td>
+                  <td><code>{k.prefix}…</code></td>
+                  <td><Badge value={k.role} /></td>
+                  <td className="text-xs">{k.scopes.join(', ')}</td>
+                  <td className="text-xs">{k.lastUsedAt ? fmt(k.lastUsedAt) : 'never'}</td>
+                  <td><Badge value={k.revokedAt ? 'disabled' : 'active'} /></td>
+                  <td className="p-4">{!k.revokedAt && <button disabled={busy} className="secondary" style={{ color: 'var(--denied, #c0392b)' }} onClick={() => void revokeKey(k)}>Revoke</button>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+    </div>
+  );
+
   const Policies = (
     <div className="grid gap-4 md:grid-cols-3">
       {([['Tool scope gate', 'Allowed only when identity has the matching scope.'], ['Human approval', 'High-risk action pauses for an admin decision.'], ['Tenant isolation', 'Supabase RLS limits each tenant to its own records.']] as [string, string][]).map(([n, d]) => (
@@ -403,7 +466,7 @@ export default function Home() {
 
   const sections: Record<string, React.ReactNode> = {
     Overview, 'Tool registry': Registry, Policies, Approvals: ApprovalsSection,
-    'Audit logs': AuditSection, Identities, Architecture, Usage,
+    'Audit logs': AuditSection, Identities, 'API keys': ApiKeys, Architecture, Usage,
   };
 
   // ── Render ────────────────────────────────────────────────────────────────
@@ -459,6 +522,40 @@ export default function Home() {
       </div>
 
       {/* Register tool modal */}
+      {keyForm && (
+        <div className="fixed inset-0 grid place-items-center bg-black/20 p-4">
+          <form onSubmit={e => void createKey(e)} className="panel w-full max-w-md p-6">
+            <div className="flex justify-between">
+              <div><h2 className="text-xl font-semibold">Create API key</h2><p style={{ color: 'var(--text-2)' }}>Admin keys are not available; use a user login.</p></div>
+              <button type="button" aria-label="Close" onClick={() => setKeyForm(false)}>×</button>
+            </div>
+            <div className="mt-5 grid gap-3">
+              <label>Name<input required name="name" maxLength={60} placeholder="Claude Code – research" /></label>
+              <label>Role<select name="role"><option value="agent">Agent (can invoke tools)</option><option value="viewer">Viewer (read only)</option></select></label>
+              <label>Scopes (comma separated)<input required name="scopes" defaultValue="tools:read" placeholder="tools:read, tools:email:send" /></label>
+            </div>
+            <div className="mt-6 flex justify-end gap-2">
+              <button type="button" className="secondary" onClick={() => setKeyForm(false)}>Cancel</button>
+              <button disabled={busy} className="primary">Create key</button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {newKey && (
+        <div className="fixed inset-0 grid place-items-center bg-black/20 p-4" role="dialog" aria-modal="true">
+          <div className="panel w-full max-w-xl p-6">
+            <h2 className="text-xl font-semibold">Copy your key now</h2>
+            <p className="mt-1" style={{ color: 'var(--text-2)' }}>This is the only time “{newKey.name}” is shown. Store it in your MCP client’s secret store.</p>
+            <input readOnly className="mt-4 w-full font-mono text-sm" value={newKey.key} onFocus={e => e.currentTarget.select()} aria-label="API key" />
+            <div className="mt-6 flex justify-end gap-2">
+              <button className="secondary" onClick={() => { void navigator.clipboard?.writeText(newKey.key).then(() => setCopied(true)).catch(() => setCopied(false)); }}>{copied ? 'Copied' : 'Copy'}</button>
+              <button className="primary" onClick={() => setNewKey(null)}>I’ve saved it</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {form && (
         <div className="fixed inset-0 grid place-items-center bg-black/20 p-4">
           <form onSubmit={create} className="panel w-full max-w-xl p-6">

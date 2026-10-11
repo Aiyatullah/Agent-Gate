@@ -71,4 +71,34 @@ describe('Agent Gate (e2e)', () => {
     const ok = await request(app.getHttpServer()).post('/mcp').set(headers).set('x-api-key', 'k-test').send(rpc).expect(200);
     expect(ok.text).toContain('pending_approval');
   });
+
+  it('manages MCP API keys end to end: create, use on /mcp, revoke', async () => {
+    const admin = await token();
+    const created = await request(app.getHttpServer()).post('/api-keys').set('Authorization', `Bearer ${admin}`)
+      .send({ name: 'Dashboard-made', role: 'agent', scopes: ['tools:read', 'tools:email:send'] }).expect(201);
+    const key = created.body.key as string;
+    expect(key).toMatch(/^agk_/);
+    const list = await request(app.getHttpServer()).get('/api-keys').set('Authorization', `Bearer ${admin}`).expect(200);
+    expect(JSON.stringify(list.body)).not.toContain(key);
+
+    const headers = { Accept: 'application/json, text/event-stream', 'Content-Type': 'application/json' };
+    const rpc = { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'agentgate_list_governed_tools', arguments: {} } };
+    await request(app.getHttpServer()).post('/mcp').set(headers).set('x-api-key', key).send(rpc).expect(200);
+
+    await request(app.getHttpServer()).delete(`/api-keys/${created.body.id}`).set('Authorization', `Bearer ${admin}`).expect(200);
+    await request(app.getHttpServer()).post('/mcp').set(headers).set('x-api-key', key).send(rpc).expect(401);
+
+    const viewer = await token({ role: 'viewer', scopes: [] });
+    await request(app.getHttpServer()).get('/api-keys').set('Authorization', `Bearer ${viewer}`).expect(403);
+  });
+
+  it('exposes Prometheus metrics, protected by METRICS_TOKEN when set', async () => {
+    const open = await request(app.getHttpServer()).get('/metrics').expect(200);
+    expect(open.text).toContain('agent_gate_up 1');
+    expect(open.text).toContain('agent_gate_mcp_requests_total');
+    process.env.METRICS_TOKEN = 'm-token';
+    await request(app.getHttpServer()).get('/metrics').expect(401);
+    await request(app.getHttpServer()).get('/metrics').set('Authorization', 'Bearer m-token').expect(200);
+    delete process.env.METRICS_TOKEN;
+  });
 });

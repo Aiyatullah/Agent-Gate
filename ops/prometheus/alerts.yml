@@ -1,0 +1,131 @@
+# Alert rules for Agent Gate. Metric names are validated against GET /metrics by src/monitoring.spec.ts.
+groups:
+  - name: agent-gate-availability
+    rules:
+      - alert: AgentGateDown
+        expr: up{job="agent-gate"} == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "Agent Gate API is unreachable"
+          description: "Prometheus cannot scrape {{ $labels.instance }} for 2 minutes."
+      - alert: AgentGateRestarted
+        expr: agent_gate_uptime_seconds < 120 and changes(agent_gate_uptime_seconds[10m]) > 0
+        for: 0m
+        labels: { severity: info }
+        annotations:
+          summary: "Agent Gate restarted"
+          description: "{{ $labels.instance }} has been up for less than 2 minutes."
+      - alert: AgentGateDatabaseDown
+        expr: agent_gate_db_configured == 1 and agent_gate_db_up == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "Postgres is failing health checks"
+          description: "Audit logs, approvals and the tool registry are unavailable or degraded."
+      - alert: AgentGateRedisDown
+        expr: agent_gate_redis_configured == 1 and agent_gate_redis_up == 0
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Redis unreachable; running on in-memory fallbacks"
+          description: "Rate limits are per-process and executions run in-process (not durable) until Redis returns."
+      - alert: AgentGateHighMemory
+        expr: agent_gate_process_resident_memory_bytes > 1.5e9
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "API process using more than 1.5 GB"
+          description: "Resident memory is {{ $value | humanize1024 }}B on {{ $labels.instance }}."
+
+  - name: agent-gate-execution
+    rules:
+      - alert: AgentGateExecutionFailures
+        expr: increase(agent_gate_executions_total{status="failed"}[15m]) >= 3
+        for: 0m
+        labels: { severity: warning }
+        annotations:
+          summary: "Approved tool executions are failing"
+          description: "{{ $value }} failed executions in 15 minutes. Check the audit log for the upstream error."
+      - alert: AgentGateExecutionFailureRatio
+        expr: |
+          sum(increase(agent_gate_executions_total{status="failed"}[30m]))
+            / clamp_min(sum(increase(agent_gate_executions_total[30m])), 1) > 0.5
+          and sum(increase(agent_gate_executions_total[30m])) >= 6
+        for: 10m
+        labels: { severity: critical }
+        annotations:
+          summary: "More than half of executions failing"
+          description: "A connector endpoint, secret or allowlist entry is probably broken."
+      - alert: AgentGateQueueBacklog
+        expr: agent_gate_exec_queue_waiting > 100
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "Execution queue backlog above 100 jobs"
+          description: "Workers are not keeping up or are down. Consider raising EXEC_CONCURRENCY."
+      - alert: AgentGateFailedJobsAccumulating
+        expr: agent_gate_exec_queue_failed > 25
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "BullMQ failed-job set is growing"
+          description: "{{ $value }} jobs sit in the failed set."
+      - alert: AgentGateNotUsingBullMQ
+        expr: agent_gate_redis_configured == 1 and agent_gate_exec_queue_bullmq == 0
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "Executions are not durable"
+          description: "REDIS_URL is set but the API is using the in-process queue; queued work is lost on restart."
+
+  - name: agent-gate-governance
+    rules:
+      - alert: AgentGateApprovalsWaiting
+        expr: agent_gate_oldest_pending_approval_age_seconds > 3600
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "An approval has waited over an hour"
+          description: "{{ $value | humanizeDuration }} since the oldest request; agents may be blocked on a human."
+      - alert: AgentGateApprovalBacklog
+        expr: agent_gate_approvals_pending > 20
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "More than 20 pending approvals"
+          description: "Review the approval queue or tighten which tools require approval."
+      - alert: AgentGateHighDenialRate
+        expr: |
+          sum(increase(agent_gate_tool_decisions_total{decision="denied"}[15m]))
+            / clamp_min(sum(increase(agent_gate_tool_decisions_total[15m])), 1) > 0.5
+          and sum(increase(agent_gate_tool_decisions_total[15m])) >= 20
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "Over half of policy decisions are denials"
+          description: "An agent may be misconfigured, or a key/role was changed. Inspect the audit log."
+      - alert: AgentGateRateLimitSpike
+        expr: increase(agent_gate_rate_limited_total[5m]) > 20
+        for: 0m
+        labels: { severity: warning }
+        annotations:
+          summary: "Clients are hitting the rate limit"
+          description: "{{ $value }} rejected calls in 5 minutes; possible runaway agent loop."
+
+  - name: agent-gate-security
+    rules:
+      - alert: AgentGateAuthFailureSpike
+        expr: increase(agent_gate_auth_failures_total[5m]) > 30
+        for: 0m
+        labels: { severity: warning }
+        annotations:
+          summary: "Spike in rejected credentials"
+          description: "{{ $value }} auth failures in 5 minutes; possible credential stuffing or an expired client token."
+      - alert: AgentGateMcpUnauthorizedSpike
+        expr: increase(agent_gate_mcp_requests_total{outcome="unauthorized"}[5m]) > 30
+        for: 0m
+        labels: { severity: warning }
+        annotations:
+          summary: "Many unauthorized remote MCP requests"
+          description: "Someone is probing /mcp with bad API keys, or a revoked key is still in use."
