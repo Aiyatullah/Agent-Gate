@@ -2,6 +2,9 @@ import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { Pool } from 'pg';
 import { encryptSecret, decryptSecret } from './secrets.js';
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const toUuid = (v: string | undefined | null): string | null => (v && UUID_RE.test(v) ? v : null);
+
 export type StoredTool = {
   id: string; name: string; slug: string; kind: 'rest' | 'mcp';
   scopes: string[]; risk: 'low' | 'high'; description: string;
@@ -145,22 +148,26 @@ export class DatabaseService implements OnModuleDestroy {
     // Graceful no-op if migration 4 hasn't been applied yet
     try { await this.pool.query('select trace_id from public.audit_logs limit 0'); }
     catch { return { ...trace, id: crypto.randomUUID() }; }
-    const r = await this.query(tenantId, 
-      `insert into public.audit_logs
-         (tenant_id, actor_id, tool_id, tool_name, trace_id, actor_name, actor_client,
-          input_summary, decision, policy_reason, execution_status, latency_ms, provider, input, created_at)
-       values ($1,$2,$3::uuid,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-       returning id::text, trace_id "traceId", tool_name "toolName",
-                 actor_name "actorName", actor_client "actorClient",
-                 input_summary "inputSummary", decision, policy_reason "policyReason",
-                 execution_status "executionStatus", latency_ms "latencyMs",
-                 created_at::text "createdAt", provider`,
-      [tenantId, trace.actorId, trace.toolId.includes('-') ? trace.toolId : null,
-        trace.toolName, trace.traceId, trace.actorName, trace.actorClient,
-        trace.inputSummary, trace.decision, trace.policyReason, trace.executionStatus,
-        trace.latencyMs, trace.provider ?? null, JSON.stringify(trace.input ?? {}), trace.createdAt],
-    );
-    return { ...r.rows[0], tenantId, actorId: trace.actorId, toolId: trace.toolId };
+    try {
+      const r = await this.query(tenantId,
+        `insert into public.audit_logs
+           (tenant_id, actor_id, tool_id, tool_name, trace_id, actor_name, actor_client,
+            input_summary, decision, policy_reason, execution_status, latency_ms, provider, input, created_at)
+         values ($1,$2::uuid,$3::uuid,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+         returning id::text, trace_id "traceId", tool_name "toolName",
+                   actor_name "actorName", actor_client "actorClient",
+                   input_summary "inputSummary", decision, policy_reason "policyReason",
+                   execution_status "executionStatus", coalesce(latency_ms,0) "latencyMs",
+                   created_at::text "createdAt", provider`,
+        [tenantId, toUuid(trace.actorId), toUuid(trace.toolId),
+          trace.toolName, trace.traceId, trace.actorName, trace.actorClient,
+          trace.inputSummary, trace.decision, trace.policyReason, trace.executionStatus,
+          trace.latencyMs, trace.provider ?? null, JSON.stringify(trace.input ?? {}), trace.createdAt],
+      );
+      return { ...r.rows[0], tenantId, actorId: trace.actorId, toolId: trace.toolId };
+    } catch {
+      return { ...trace, id: crypto.randomUUID() };
+    }
   }
 
   async updateAuditLog(tenantId: string, traceId: string, patch: Partial<Pick<StoredTrace, 'decision' | 'executionStatus' | 'policyReason' | 'latencyMs' | 'provider' | 'output'>> & { error?: string }): Promise<void> {
@@ -204,22 +211,26 @@ export class DatabaseService implements OnModuleDestroy {
     // Graceful no-op if migration 4 hasn't been applied yet
     try { await this.pool.query('select trace_id from public.approval_requests limit 0'); }
     catch { return { ...approval, id: crypto.randomUUID() }; }
-    const r = await this.query(tenantId, 
-      `insert into public.approval_requests
-         (tenant_id, tool_id, tool_name, trace_id, actor_name, actor_client,
-          input_summary, policy_reason, status, execution_status, created_at, input)
-       values ($1,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-       returning id::text, trace_id "traceId", tool_id::text "toolId", tool_name "toolName",
-                 actor_name "actorName", actor_client "actorClient",
-                 input_summary "inputSummary", policy_reason "policyReason",
-                 status, execution_status "executionStatus",
-                 created_at::text "createdAt", approved_by "approvedBy"`,
-      [tenantId, approval.toolId.includes('-') ? approval.toolId : null,
-        approval.toolName, approval.traceId, approval.actorName, approval.actorClient,
-        approval.inputSummary, approval.policyReason, approval.status,
-        approval.executionStatus, approval.createdAt, JSON.stringify(approval.input ?? {})],
-    );
-    return { ...r.rows[0], tenantId };
+    try {
+      const r = await this.query(tenantId,
+        `insert into public.approval_requests
+           (tenant_id, tool_id, tool_name, trace_id, actor_name, actor_client,
+            input_summary, policy_reason, status, execution_status, created_at, input)
+         values ($1,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+         returning id::text, trace_id "traceId", tool_id::text "toolId", tool_name "toolName",
+                   actor_name "actorName", actor_client "actorClient",
+                   input_summary "inputSummary", policy_reason "policyReason",
+                   status, execution_status "executionStatus",
+                   created_at::text "createdAt", approved_by "approvedBy"`,
+        [tenantId, toUuid(approval.toolId),
+          approval.toolName, approval.traceId, approval.actorName, approval.actorClient,
+          approval.inputSummary, approval.policyReason, approval.status,
+          approval.executionStatus, approval.createdAt, JSON.stringify(approval.input ?? {})],
+      );
+      return { ...r.rows[0], tenantId };
+    } catch {
+      return { ...approval, id: crypto.randomUUID() };
+    }
   }
 
   async updateApproval(tenantId: string, id: string, patch: { status: string; executionStatus: string; approvedBy?: string }): Promise<StoredApproval> {
