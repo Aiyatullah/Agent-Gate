@@ -4,10 +4,12 @@ import { ConfigModule } from '@nestjs/config';
 import { DatabaseService } from './database.service.js';
 import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
+import { ConnectorService } from './connector.service.js';
+import { ExecutionService } from './execution.service.js';
 
 @Module({
   imports: [ConfigModule.forRoot({ isGlobal: true }), JwtModule.register({ secret: process.env.JWT_SECRET ?? 'local-development-secret-change-me', signOptions: { expiresIn: '1h' } })],
   controllers: [AppController],
-  providers: [AppService, DatabaseService],
+  providers: [AppService, DatabaseService, ConnectorService, ExecutionService],
 })
 export class AppModule {}

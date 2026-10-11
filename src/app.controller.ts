@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Headers, Param, Patch, Post, UnauthorizedException } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Headers, Param, Patch, Post, Query, UnauthorizedException } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { JwtService } from '@nestjs/jwt';
 import { AppService, Role, Tool } from './app.service.js';
@@ -68,8 +68,8 @@ export class AppController {
   }
 
   @ApiBearerAuth() @Get('audit-logs')
-  audit(@Headers('authorization') h?: string) {
-    return this.service.listAudit(this.actor(h));
+  audit(@Query('limit') limit?: string, @Query('offset') offset?: string, @Headers('authorization') h?: string) {
+    return this.service.listAudit(this.actor(h), Number(limit), Number(offset));
   }
 
   @ApiBearerAuth() @Post('audit-logs/:id/replay')

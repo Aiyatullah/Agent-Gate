@@ -1,5 +1,7 @@
-import { ForbiddenException, HttpException, HttpStatus, Injectable, NotFoundException, Optional } from '@nestjs/common';
+import { ConflictException, ForbiddenException, HttpException, HttpStatus, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { DatabaseService, StoredTool, StoredTrace, StoredApproval } from './database.service.js';
+import { ExecutionService, log } from './execution.service.js';
+import type { ConnectorResult } from './connector.service.js';
 
 export type Role = 'admin' | 'agent' | 'viewer';
 export type Tool = StoredTool;
@@ -25,7 +27,7 @@ export class AppService {
   private readonly memApprovals: StoredApproval[] = [];
   private readonly requests = new Map<string, number[]>();
 
-  constructor(@Optional() private readonly db?: DatabaseService) {}
+  constructor(@Optional() private readonly db?: DatabaseService, @Optional() private readonly exec?: ExecutionService) {}
 
   health() { return { status: 'ok', service: 'agent-gate', at: new Date().toISOString() }; }
 
@@ -67,16 +69,17 @@ export class AppService {
 
   // ── Audit logs ───────────────────────────────────────────────────────────
 
-  async listAudit(a: Actor) {
-    if (this.db && await this.db.migration4Ready()) return this.db.listAuditLogs(a.tenantId);
-    return this.memTraces.filter(x => x.tenantId === a.tenantId).slice(0, 50);
+  async listAudit(a: Actor, limit = 50, offset = 0) {
+    const n = Math.min(Math.max(Math.trunc(limit) || 50, 1), 200), o = Math.max(Math.trunc(offset) || 0, 0);
+    if (this.db && await this.db.migration4Ready()) return this.db.listAuditLogs(a.tenantId, n, o);
+    return this.memTraces.filter(x => x.tenantId === a.tenantId).slice(o, o + n);
   }
 
   // ── Approvals ────────────────────────────────────────────────────────────
 
   async listApprovals(a: Actor) {
     if (this.db && await this.db.migration4Ready()) return this.db.listApprovals(a.tenantId);
-    return this.memApprovals.filter(x => x.tenantId === a.tenantId);
+    return this.memApprovals.filter(x => x.tenantId === a.tenantId).map(({ input: _i, ...rest }) => rest);
   }
 
   // ── Users (in-memory seed) ───────────────────────────────────────────────
@@ -110,10 +113,11 @@ export class AppService {
         traceId: tr.traceId, tenantId: a.tenantId, toolId: t.id, toolName: t.name,
         actorName: tr.actorName, actorClient: tr.actorClient, inputSummary: tr.inputSummary,
         policyReason: tr.policyReason, status: 'pending', executionStatus: 'waiting_for_approval',
-        createdAt: new Date().toISOString(),
+        createdAt: new Date().toISOString(), input,
       };
       if (this.db && await this.db.migration4Ready()) {
         const saved = await this.db.createApproval(a.tenantId, approval);
+        log('info', 'approval_requested', { tenantId: a.tenantId, tool: t.slug, traceId: tr.traceId });
         return { decision: 'pending_approval', approvalId: saved.id, traceId: tr.traceId };
       }
       const mem: StoredApproval = { ...approval, id: crypto.randomUUID() };
@@ -121,8 +125,12 @@ export class AppService {
       return { decision: 'pending_approval', approvalId: mem.id, traceId: tr.traceId };
     }
 
-    const tr = await this.trace(a, t, 'allowed', 'Tool scope and active policy passed.', input, 'completed', 12, 'mock-primary');
-    return { decision: 'allowed', traceId: tr.traceId, output: { tool: t.name, source: 'mock-primary' } };
+    const started = Date.now();
+    const r = this.exec ? await this.runNow(t, input) : undefined;
+    const ok = r ? r.ok : true;
+    const tr = await this.trace(a, t, ok ? 'allowed' : 'failed', ok ? 'Tool scope and active policy passed.' : `Execution failed: ${r?.error}`, input, ok ? 'completed' : 'failed', Date.now() - started, r?.simulated === false ? 'connector' : 'mock-primary', r?.output);
+    log('info', 'tool_invoked', { tenantId: a.tenantId, tool: t.slug, decision: tr.decision, traceId: tr.traceId });
+    return { decision: tr.decision, traceId: tr.traceId, output: r?.output ?? { tool: t.name, source: 'mock-primary' }, ...(ok ? {} : { error: r?.error }) };
   }
 
   // ── Approval decision ────────────────────────────────────────────────────
@@ -132,50 +140,81 @@ export class AppService {
     const status = approve ? 'approved' : 'denied';
     const executionStatus = approve ? 'approved_pending_execution' : 'blocked';
     const approvedBy = a.actorName ?? 'Tenant Admin';
+    const reason = approve ? 'Approved by tenant administrator.' : 'Denied by tenant administrator.';
+    const useDb = Boolean(this.db && await this.db.migration4Ready());
 
-    if (this.db && await this.db.migration4Ready()) {
-      const updated = await this.db.updateApproval(id, { status, executionStatus, approvedBy });
-      await this.db.updateAuditLog(updated.traceId, {
-        decision: status, executionStatus,
-        policyReason: approve ? 'Approved by tenant administrator.' : 'Denied by tenant administrator.',
-        latencyMs: 8,
-      });
-      return updated;
+    let x: StoredApproval | undefined;
+    if (useDb) {
+      const current = (await this.db!.listApprovals(a.tenantId)).find(i => i.id === id);
+      if (!current) throw new NotFoundException('Approval request was not found.');
+      if (current.status !== 'pending') throw new ConflictException('Approval was already decided.');
+      x = await this.db!.updateApproval(a.tenantId, id, { status, executionStatus, approvedBy });
+      await this.db!.updateAuditLog(a.tenantId, x.traceId, { decision: status, executionStatus, policyReason: reason, latencyMs: 8 });
+    } else {
+      x = this.memApprovals.find(i => i.id === id && i.tenantId === a.tenantId);
+      if (!x) throw new NotFoundException('Approval request was not found.');
+      if (x.status !== 'pending') throw new ConflictException('Approval was already decided.');
+      x.status = status; x.executionStatus = executionStatus; x.approvedBy = approvedBy;
+      const trace = this.memTraces.find(t => t.traceId === x!.traceId);
+      if (trace) Object.assign(trace, { decision: status, executionStatus, policyReason: reason, latencyMs: 8 });
     }
+    log('info', 'approval_decided', { tenantId: a.tenantId, approvalId: id, status });
+    if (approve) await this.dispatch(a, x, useDb);
+    const { input: _omit, ...safe } = x;
+    return safe;
+  }
 
-    const x = this.memApprovals.find(i => i.id === id && i.tenantId === a.tenantId);
-    if (!x) throw new NotFoundException('Approval request was not found.');
-    x.status = status as 'approved' | 'denied';
+  /** Queues an approved call on the execution worker; status moves to completed/failed asynchronously. */
+  private async dispatch(a: Actor, x: StoredApproval, useDb: boolean) {
+    if (!this.exec) return;
+    const tool = (await this.rawTools(a)).find(t => t.id === x.toolId);
+    if (!tool) { await this.finish(a, x, useDb, { ok: false, error: 'Tool no longer exists.', attempts: 0 }); return; }
+    const input = x.input ?? (useDb ? await this.db!.getApprovalInput(a.tenantId, x.id) : {});
+    this.exec.enqueue({ tool, input, done: r => this.finish(a, x, useDb, r) });
+  }
+
+  private async finish(a: Actor, x: StoredApproval, useDb: boolean, r: ConnectorResult) {
+    const executionStatus = r.ok ? 'completed' : 'failed';
     x.executionStatus = executionStatus;
-    x.approvedBy = approvedBy;
-    const trace = this.memTraces.find(t => t.traceId === x.traceId);
-    if (trace) {
-      trace.decision = status;
-      trace.executionStatus = executionStatus;
-      trace.policyReason = approve ? 'Approved by tenant administrator.' : 'Denied by tenant administrator.';
-      trace.latencyMs = 8;
+    const policyReason = r.ok ? 'Approved and executed.' : `Approved but execution failed: ${r.error}`;
+    if (useDb) {
+      await this.db!.updateApproval(a.tenantId, x.id, { status: 'approved', executionStatus, approvedBy: x.approvedBy ?? 'Tenant Admin' });
+      await this.db!.updateAuditLog(a.tenantId, x.traceId, { executionStatus, policyReason, output: r.output, error: r.error });
+    } else {
+      const trace = this.memTraces.find(t => t.traceId === x.traceId);
+      if (trace) Object.assign(trace, { executionStatus, policyReason, output: r.output });
     }
-    return x;
+    log(r.ok ? 'info' : 'error', 'execution_finished', { tenantId: a.tenantId, approvalId: x.id, executionStatus, attempts: r.attempts, error: r.error });
+  }
+
+  private async runNow(t: Tool, input: Input): Promise<ConnectorResult & { simulated?: boolean }> {
+    const done = new Promise<ConnectorResult>(res => this.exec!.enqueue({ tool: t, input, done: res }));
+    const r = await done;
+    return { ...r, simulated: r.simulated ?? false };
   }
 
   // ── Replay ───────────────────────────────────────────────────────────────
 
+  /**
+   * Safe replay: re-evaluates the recorded policy decision only. Tools are never
+   * re-executed, so side-effecting calls cannot fire twice.
+   */
   async replay(a: Actor, id: string) {
-    const traces = await this.listAudit(a);
-    const trace = traces.find(x => x.id === id);
+    const trace = (await this.listAudit(a, 200)).find(x => x.id === id);
     if (!trace) throw new NotFoundException('Trace was not found.');
     return {
-      traceId: trace.traceId, toolName: trace.toolName,
+      traceId: trace.traceId, toolName: trace.toolName, sideEffectsReplayed: false,
+      original: { decision: trace.decision, executionStatus: trace.executionStatus, provider: trace.provider ?? null, latencyMs: trace.latencyMs, output: trace.output ?? null },
       comparison: [
-        { provider: 'mock-primary', result: 'allowed', latencyMs: 12, costUsd: 0.0002 },
-        { provider: 'mock-fallback', result: 'allowed', latencyMs: 19, costUsd: 0.0001 },
+        { provider: trace.provider ?? 'mock-primary', result: trace.decision, latencyMs: trace.latencyMs, costUsd: 0.0002 },
+        { provider: 'mock-fallback', result: trace.decision, latencyMs: trace.latencyMs + 7, costUsd: 0.0001 },
       ],
     };
   }
 
   // ── Internal helpers ─────────────────────────────────────────────────────
 
-  private async trace(a: Actor, t: Tool, decision: string, policyReason: string, input: Input, executionStatus: string, latencyMs: number, provider?: string): Promise<StoredTrace> {
+  private async trace(a: Actor, t: Tool, decision: string, policyReason: string, input: Input, executionStatus: string, latencyMs: number, provider?: string, output?: unknown): Promise<StoredTrace> {
     const now = new Date().toISOString();
     const tr: Omit<StoredTrace, 'id'> = {
       traceId: `tr_${crypto.randomUUID().replaceAll('-', '').slice(0, 12)}`,
@@ -184,9 +223,13 @@ export class AppService {
       actorClient: a.client ?? (a.role === 'agent' ? 'Claude Code' : 'Dashboard'),
       toolId: t.id, toolName: t.name,
       inputSummary: this.summarize(input), decision, policyReason,
-      executionStatus, latencyMs, provider, createdAt: now,
+      executionStatus, latencyMs, provider, createdAt: now, output,
     };
-    if (this.db && await this.db.migration4Ready()) return this.db.createAuditLog(a.tenantId, tr);
+    if (this.db && await this.db.migration4Ready()) {
+      const saved = await this.db.createAuditLog(a.tenantId, tr);
+      if (output !== undefined) await this.db.updateAuditLog(a.tenantId, saved.traceId, { output });
+      return saved;
+    }
     const mem: StoredTrace = { ...tr, id: crypto.randomUUID() };
     this.memTraces.unshift(mem);
     return mem;
