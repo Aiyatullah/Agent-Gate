@@ -1,0 +1,18 @@
+services:
+  api:
+    build: .
+    env_file: .env
+    ports:
+      - "3000:3000"
+  web:
+    image: node:22-alpine
+    working_dir: /app
+    volumes:
+      - ./apps/web:/app
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:3000
+    command: sh -c "npm ci --legacy-peer-deps && npm run dev -- -H 0.0.0.0 -p 3001"
+    ports:
+      - "3001:3001"
+    depends_on:
+      - api

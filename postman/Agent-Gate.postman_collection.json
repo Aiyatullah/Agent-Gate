@@ -1,0 +1,10 @@
+{
+  "info": { "name": "Agent Gate", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json" },
+  "variable": [{ "key": "baseUrl", "value": "http://localhost:3000" }, { "key": "token", "value": "" }],
+  "item": [
+    { "name": "Health", "request": { "method": "GET", "url": "{{baseUrl}}/health" } },
+    { "name": "Demo admin token", "request": { "method": "POST", "header": [{"key":"Content-Type","value":"application/json"}], "body": { "mode":"raw", "raw":"{\"role\":\"admin\"}" }, "url": "{{baseUrl}}/auth/demo-token" } },
+    { "name": "List scoped tools", "request": { "method": "GET", "header": [{"key":"Authorization","value":"Bearer {{token}}"}], "url": "{{baseUrl}}/tools" } },
+    { "name": "High-risk tool call", "request": { "method": "POST", "header": [{"key":"Authorization","value":"Bearer {{token}}"}], "url": "{{baseUrl}}/tools/email-send/calls" } }
+  ]
+}
