@@ -1,0 +1,261 @@
+/* ==========================================================================
+   AgentGate design tokens: "Paper Ledger"
+   Light by default, dark theme included (opt-in via data-theme or OS setting).
+   Fonts: Instrument Sans (UI), JetBrains Mono (code), Fraunces (editorial).
+   Load them with next/font (see design-spec.md) and map to the variables below.
+   ========================================================================== */
+
+:root {
+  /* ---- Typography ---- */
+  --font-sans: var(--font-instrument-sans), system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: var(--font-jetbrains-mono), ui-monospace, "SF Mono", Menlo, monospace;
+  --font-display: var(--font-fraunces), Georgia, "Times New Roman", serif;
+
+  /* Type scale: size / line-height */
+  --text-2xs: 11px;  --lh-2xs: 16px;   /* eyebrow labels, uppercase, 0.08em tracking */
+  --text-xs: 12px;   --lh-xs: 16px;    /* badges, chips, captions */
+  --text-sm: 13px;   --lh-sm: 20px;    /* table text, helper text */
+  --text-base: 14px; --lh-base: 22px;  /* default UI body */
+  --text-md: 16px;   --lh-md: 24px;    /* card titles, large body */
+  --text-lg: 20px;   --lh-lg: 28px;
+  --text-xl: 24px;   --lh-xl: 32px;
+  --text-2xl: 30px;  --lh-2xl: 38px;   /* page titles */
+  --text-3xl: 40px;  --lh-3xl: 46px;
+  --text-4xl: 56px;  --lh-4xl: 60px;   /* marketing headlines (display font) */
+  --text-5xl: 72px;  --lh-5xl: 74px;   /* marketing hero (display font) */
+
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+
+  --tracking-tight: -0.02em;   /* headings */
+  --tracking-display: -0.03em; /* display font, 40px and up */
+  --tracking-eyebrow: 0.08em;
+
+  /* ---- Spacing (4px base) ---- */
+  --space-1: 4px;  --space-2: 8px;   --space-3: 12px; --space-4: 16px;
+  --space-5: 20px; --space-6: 24px;  --space-8: 32px; --space-10: 40px;
+  --space-12: 48px; --space-16: 64px; --space-24: 96px;
+
+  /* ---- Shape ---- */
+  --radius-sm: 6px;    /* chips, code tags */
+  --radius-md: 8px;    /* buttons, inputs, nav items */
+  --radius-lg: 12px;   /* cards, tables, modals */
+  --radius-pill: 999px;/* badges */
+
+  /* ---- Motion ---- */
+  --ease-out: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --duration-fast: 120ms;
+  --duration-base: 180ms;
+
+  /* ---- Layout ---- */
+  --sidebar-width: 248px;
+  --content-max: 1280px;
+
+  /* ---- Color: Paper Ledger (light) ---- */
+  --bg: #F6F5F1;            /* app background, warm paper */
+  --surface: #FFFFFF;       /* cards, sidebar, tables */
+  --raised: #FAF9F5;        /* table header, subtle fills */
+  --elev: #EEF0F7;          /* hover/selected rows, chips, secondary buttons */
+  --line: #E4E1D8;          /* default borders */
+  --line-strong: #CFCBC0;   /* inputs, secondary button borders */
+
+  --text: #12151F;
+  --text-2: #4B5266;
+  --text-3: #656C81;        /* lowest allowed text color (AA on bg, surface, elev) */
+
+  --primary: #2F55D4;       /* main action, active state, links, focus ring */
+  --primary-hover: #2445B5;
+  --primary-pressed: #1C3796;
+  --on-primary: #FFFFFF;
+
+  --ink: #12151F;           /* logo mark, strongest brand surface */
+  --on-ink: #F6F5F1;
+
+  --allowed: #0B7A55;
+  --pending: #8F5A00;
+  --denied: #B42A2A;
+  --info: var(--primary);
+
+  /* Status tints are derived, so every status looks identical in structure */
+  --allowed-tint: color-mix(in srgb, var(--allowed) 11%, transparent);
+  --pending-tint: color-mix(in srgb, var(--pending) 11%, transparent);
+  --denied-tint: color-mix(in srgb, var(--denied) 11%, transparent);
+  --info-tint: color-mix(in srgb, var(--primary) 10%, transparent);
+
+  --focus-ring: 0 0 0 2px var(--surface), 0 0 0 4px color-mix(in srgb, var(--primary) 55%, transparent);
+  --shadow-card: 0 1px 2px rgba(18, 21, 31, 0.04);
+  --shadow-pop: 0 8px 24px rgba(18, 21, 31, 0.10), 0 1px 2px rgba(18, 21, 31, 0.06);
+
+  color-scheme: light;
+}
+
+/* ---- Dark theme: same roles, new values ---- */
+:root[data-theme="dark"] {
+  --bg: #0F1117;
+  --surface: #161922;
+  --raised: #1B1F2A;
+  --elev: #232838;
+  --line: #2A2F3D;
+  --line-strong: #394057;
+
+  --text: #ECEEF4;
+  --text-2: #AEB5C6;
+  --text-3: #8189A0;
+
+  --primary: #6C8CFF;
+  --primary-hover: #8AA3FF;
+  --primary-pressed: #5875E6;
+  --on-primary: #0B1020;
+
+  --ink: #ECEEF4;
+  --on-ink: #0F1117;
+
+  --allowed: #3DD6A0;
+  --pending: #F2B84B;
+  --denied: #FF7A7A;
+
+  --allowed-tint: color-mix(in srgb, var(--allowed) 14%, transparent);
+  --pending-tint: color-mix(in srgb, var(--pending) 14%, transparent);
+  --denied-tint: color-mix(in srgb, var(--denied) 14%, transparent);
+
+  --focus-ring: 0 0 0 2px var(--surface), 0 0 0 4px color-mix(in srgb, var(--primary) 60%, transparent);
+  --shadow-card: none;
+  --shadow-pop: 0 0 0 1px var(--line-strong);
+
+  color-scheme: dark;
+}
+
+/* Follow the OS only when the app has not chosen a theme explicitly */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]):not([data-theme="dark"]) {
+    --bg: #0F1117; --surface: #161922; --raised: #1B1F2A; --elev: #232838;
+    --line: #2A2F3D; --line-strong: #394057;
+    --text: #ECEEF4; --text-2: #AEB5C6; --text-3: #8189A0;
+    --primary: #6C8CFF; --primary-hover: #8AA3FF; --primary-pressed: #5875E6; --on-primary: #0B1020;
+    --ink: #ECEEF4; --on-ink: #0F1117;
+    --allowed: #3DD6A0; --pending: #F2B84B; --denied: #FF7A7A;
+    --allowed-tint: color-mix(in srgb, var(--allowed) 14%, transparent);
+    --pending-tint: color-mix(in srgb, var(--pending) 14%, transparent);
+    --denied-tint: color-mix(in srgb, var(--denied) 14%, transparent);
+    --focus-ring: 0 0 0 2px var(--surface), 0 0 0 4px color-mix(in srgb, var(--primary) 60%, transparent);
+    --shadow-card: none; --shadow-pop: 0 0 0 1px var(--line-strong);
+    color-scheme: dark;
+  }
+}
+
+/* ==========================================================================
+   Base
+   ========================================================================== */
+html { background: var(--bg); }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: var(--lh-base);
+  -webkit-font-smoothing: antialiased;
+}
+h1, h2, h3 { letter-spacing: var(--tracking-tight); font-weight: var(--weight-semibold); margin: 0; }
+h1 { font-size: var(--text-2xl); line-height: var(--lh-2xl); }
+h2 { font-size: var(--text-lg); line-height: var(--lh-lg); }
+h3 { font-size: var(--text-md); line-height: var(--lh-md); }
+code, kbd, samp, pre { font-family: var(--font-mono); }
+table, .tabular { font-variant-numeric: tabular-nums; }
+a { color: var(--primary); }
+a:hover { color: var(--primary-hover); }
+::selection { background: color-mix(in srgb, var(--primary) 22%, transparent); }
+:focus-visible { outline: none; box-shadow: var(--focus-ring); border-radius: var(--radius-md); }
+
+/* Editorial moments only: marketing headlines, big empty states, page intros */
+.display {
+  font-family: var(--font-display);
+  font-weight: 500;
+  letter-spacing: var(--tracking-display);
+}
+.display em { font-style: italic; color: var(--primary); }
+
+.eyebrow {
+  font-size: var(--text-2xs);
+  line-height: var(--lh-2xs);
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  font-weight: var(--weight-semibold);
+  color: var(--text-3);
+}
+
+/* ==========================================================================
+   Components
+   ========================================================================== */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+}
+
+/* Buttons: one primary per screen */
+.btn {
+  font: inherit; font-size: var(--text-base); font-weight: var(--weight-medium);
+  padding: 10px 16px; border-radius: var(--radius-md);
+  border: 1px solid transparent; cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out), border-color var(--duration-fast) var(--ease-out);
+}
+.btn-primary { background: var(--primary); color: var(--on-primary); font-weight: var(--weight-semibold); }
+.btn-primary:hover { background: var(--primary-hover); }
+.btn-primary:active { background: var(--primary-pressed); }
+.btn-secondary { background: var(--elev); color: var(--text); border-color: var(--line-strong); }
+.btn-secondary:hover { border-color: var(--text-3); }
+.btn-ghost { background: transparent; color: var(--text-2); }
+.btn-ghost:hover { background: var(--elev); color: var(--text); }
+.btn-danger { background: var(--denied); color: var(--surface); font-weight: var(--weight-semibold); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Status badge: always tint + colored text + dot, never color alone */
+.badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 2px 10px; border-radius: var(--radius-pill);
+  font-size: var(--text-xs); line-height: 20px; font-weight: var(--weight-semibold);
+}
+.badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.badge-allowed { background: var(--allowed-tint); color: var(--allowed); }
+.badge-pending { background: var(--pending-tint); color: var(--pending); }
+.badge-denied  { background: var(--denied-tint);  color: var(--denied); }
+.badge-info    { background: var(--info-tint);    color: var(--primary); }
+
+/* Scope / ID chip */
+.chip {
+  display: inline-block; font-family: var(--font-mono); font-size: var(--text-xs);
+  background: var(--elev); border: 1px solid var(--line);
+  border-radius: var(--radius-sm); padding: 2px 8px;
+}
+
+/* Table */
+.table-head {
+  background: var(--raised); color: var(--text-3);
+  font-size: var(--text-2xs); line-height: var(--lh-2xs);
+  letter-spacing: var(--tracking-eyebrow); text-transform: uppercase; font-weight: var(--weight-semibold);
+}
+.table-row { border-top: 1px solid var(--line); transition: background var(--duration-fast) var(--ease-out); }
+.table-row:hover { background: var(--raised); }
+.table-row[aria-selected="true"] { background: var(--elev); }
+
+/* Navigation item */
+.nav-item { padding: 8px 12px; border-radius: var(--radius-md); color: var(--text-2); text-decoration: none; }
+.nav-item:hover { background: var(--elev); color: var(--text); }
+.nav-item[aria-current="page"] { background: var(--elev); color: var(--text); font-weight: var(--weight-medium); }
+
+/* Inputs */
+.input {
+  font: inherit; width: 100%; box-sizing: border-box;
+  padding: 10px 12px; border-radius: var(--radius-md);
+  background: var(--surface); color: var(--text); border: 1px solid var(--line-strong);
+}
+.input::placeholder { color: var(--text-3); }
+.input:hover { border-color: var(--text-3); }
+.input:focus-visible { border-color: var(--primary); }
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}
