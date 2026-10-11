@@ -47,6 +47,10 @@ npm run dev -- -p 3001
 4. View each policy decision in the trace table.
 5. In Swagger, use `POST /auth/demo-token` to mint a bearer token; invoke `POST /tools/weather-proxy/calls` for an allowed call or `POST /tools/email-send/calls` for a paused call.
 
+## Register a governed tool
+
+Open Dashboard → **Tool registry** → **Register tool**. Only an admin can register a tenant tool. The form records its REST/MCP type, endpoint, required scopes, risk, lifecycle status and approval mode in Supabase. Keep a new high-risk tool in `draft` until its policy is reviewed; only active tools are discoverable by non-admin agents.
+
 Import [the Postman collection](postman/Agent-Gate.postman_collection.json) for the same flow.
 
 ## Verification
