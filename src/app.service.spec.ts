@@ -3,14 +3,20 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AppService } from './app.service.js';
 import { ConnectorService } from './connector.service.js';
 import { ExecutionService } from './execution.service.js';
+import { RedisService } from './redis.service.js';
+import { RateLimitService } from './rate-limit.service.js';
+import { ProviderService } from './provider.service.js';
+import { MetricsService } from './metrics.service.js';
 
 const admin = { sub: 'a1', tenantId: 'tenant-a', role: 'admin' as const, scopes: ['tools:read', 'tools:email:send'] };
 const otherAdmin = { ...admin, tenantId: 'tenant-b' };
 const viewer = { sub: 'v1', tenantId: 'tenant-a', role: 'viewer' as const, scopes: [] };
 
 const make = () => {
-  const exec = new ExecutionService(new ConnectorService());
-  return { s: new AppService(undefined, exec), exec };
+  const redis = new RedisService();
+  const connector = new ConnectorService();
+  const exec = new ExecutionService(redis);
+  return { s: new AppService(undefined, exec, new RateLimitService(redis), connector, new MetricsService(), new ProviderService()), exec };
 };
 
 describe('policy gateway', () => {
@@ -80,6 +86,7 @@ describe('policy gateway', () => {
     const spy = vi.spyOn(ConnectorService.prototype, 'execute');
     const out = await s.replay(admin, t.id);
     expect(out.sideEffectsReplayed).toBe(false);
+    expect(out.comparison.map(c => c.provider)).toEqual(['mock-primary', 'mock-fallback']);
     expect(spy).not.toHaveBeenCalled();
   });
 });
@@ -108,5 +115,25 @@ describe('connector', () => {
     const r = await c.execute({ id: 't', name: 't', slug: 't', kind: 'rest', scopes: [], risk: 'low', description: '', status: 'active', approvalMode: 'auto', inputRequired: ['q'] }, {});
     expect(r.ok).toBe(false);
     expect(r.error).toMatch(/q/);
+  });
+});
+
+describe('providers', () => {
+  it('falls back to the next provider when the first fails', async () => {
+    const p = new ProviderService();
+    const { selected, attempts } = await p.complete('hi', ['nope', 'mock-primary']);
+    expect(attempts[0].ok).toBe(false);
+    expect(selected?.provider).toBe('mock-primary');
+  });
+});
+
+describe('secrets', () => {
+  it('round-trips and rejects tampering', async () => {
+    process.env.SECRETS_KEY = 'unit-test-key';
+    const { encryptSecret, decryptSecret } = await import('./secrets.js');
+    const blob = encryptSecret('s3cret');
+    expect(blob).not.toContain('s3cret');
+    expect(decryptSecret(blob)).toBe('s3cret');
+    expect(() => decryptSecret(blob.replace(/.$/, c => (c === 'A' ? 'B' : 'A')))).toThrow();
   });
 });

@@ -44,3 +44,19 @@ This launches the server via stdio, performs the protocol handshake, lists its t
 ## Safety model
 
 This sample server intentionally exposes no shell, filesystem, or raw database tools. Its tools can only call the explicit Agent Gate API routes. A production deployment should use per-client identity, a real issuer/JWKS validator, an authenticated remote Streamable HTTP transport, and a provider credential vault.
+
+## Remote (Streamable HTTP) MCP
+
+Set `MCP_CLIENTS` on the API to a JSON array; each entry is one client identity bound to a tenant, role, and scopes:
+
+```json
+[{"name":"Claude Code","key":"agk_long_random_key","tenantId":"00000000-0000-0000-0000-000000000001","role":"agent","scopes":["tools:read","tools:email:send"]}]
+```
+
+Then point clients at `MCP_PUBLIC_URL` (e.g. `https://api.yourdomain.com/mcp`). The endpoint is stateless, accepts `POST` only, and authenticates with `x-api-key` or `Authorization: Bearer <key>`. A Better Auth session token also works.
+
+```powershell
+claude mcp add --transport http agent-gate https://api.yourdomain.com/mcp --header "x-api-key: agk_long_random_key"
+```
+
+Tools: `agentgate_list_governed_tools`, `agentgate_call_tool` (`tool`, `input`), `agentgate_request_email_send`. Every call goes through the same policy, rate limit, approval queue, and audit trail as the REST API.

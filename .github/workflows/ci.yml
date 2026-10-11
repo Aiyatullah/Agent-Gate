@@ -3,6 +3,13 @@ on: [push, pull_request]
 jobs:
   api:
     runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: --health-cmd "redis-cli ping" --health-interval 5s --health-retries 10
+    env:
+      REDIS_URL: redis://localhost:6379
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -10,6 +17,7 @@ jobs:
       - run: npm ci --legacy-peer-deps
       - run: npm run build
       - run: npm test
+      - run: npm run test:e2e
       - run: docker build -t agent-gate-api .
   web:
     runs-on: ubuntu-latest

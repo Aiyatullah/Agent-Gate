@@ -1,11 +1,12 @@
 import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { Pool } from 'pg';
+import { encryptSecret, decryptSecret } from './secrets.js';
 
 export type StoredTool = {
   id: string; name: string; slug: string; kind: 'rest' | 'mcp';
   scopes: string[]; risk: 'low' | 'high'; description: string;
   status: 'draft' | 'active' | 'disabled'; approvalMode: 'auto' | 'required' | 'deny';
-  endpoint?: string; inputRequired?: string[];
+  endpoint?: string; inputRequired?: string[]; hasSecret?: boolean; secret?: string;
 };
 
 export type StoredTrace = {
@@ -45,6 +46,21 @@ export class DatabaseService implements OnModuleDestroy {
     return this._migration4;
   }
 
+  /** Runs a tenant query; with DB_RLS=true it executes under the `authenticated` role with app.tenant_id set so Postgres RLS is enforced. */
+  private async query(tenantId: string, sql: string, params: unknown[] = []) {
+    if (process.env.DB_RLS !== 'true') return this.pool!.query(sql, params);
+    const c = await this.pool!.connect();
+    try {
+      await c.query('begin');
+      await c.query('set local role authenticated');
+      await c.query("select set_config('app.tenant_id', $1, true)", [tenantId]);
+      const r = await c.query(sql, params);
+      await c.query('commit');
+      return r;
+    } catch (e) { await c.query('rollback').catch(() => {}); throw e; }
+    finally { c.release(); }
+  }
+
   get enabled() { return Boolean(this.pool); }
 
   async status() {
@@ -57,10 +73,11 @@ export class DatabaseService implements OnModuleDestroy {
 
   async listTools(tenantId: string): Promise<StoredTool[]> {
     if (!this.pool) return [];
-    const r = await this.pool.query(
+    const r = await this.query(tenantId, 
       `select id::text, name, slug, kind, scopes, risk,
               descriptor->>'description' description, status,
-              approval_mode "approvalMode", endpoint, descriptor->'inputRequired' "inputRequired"
+              approval_mode "approvalMode", endpoint, descriptor->'inputRequired' "inputRequired",
+              (descriptor ? 'secretEnc') "hasSecret"
        from public.tools where tenant_id=$1 order by created_at desc`,
       [tenantId],
     );
@@ -69,7 +86,7 @@ export class DatabaseService implements OnModuleDestroy {
 
   async createTool(tenantId: string, tool: Omit<StoredTool, 'id'>): Promise<StoredTool> {
     if (!this.pool) throw new Error('Database is not configured.');
-    const r = await this.pool.query(
+    const r = await this.query(tenantId, 
       `insert into public.tools
          (tenant_id,name,slug,kind,scopes,risk,descriptor,status,approval_mode,endpoint)
        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
@@ -77,9 +94,9 @@ export class DatabaseService implements OnModuleDestroy {
                  descriptor->>'description' description, status,
                  approval_mode "approvalMode", endpoint`,
       [tenantId, tool.name, tool.slug, tool.kind, tool.scopes, tool.risk,
-        JSON.stringify({ description: tool.description, inputRequired: tool.inputRequired ?? [] }), tool.status, tool.approvalMode, tool.endpoint ?? null],
+        JSON.stringify({ description: tool.description, inputRequired: tool.inputRequired ?? [], ...(tool.secret ? { secretEnc: encryptSecret(tool.secret) } : {}) }), tool.status, tool.approvalMode, tool.endpoint ?? null],
     );
-    return r.rows[0];
+    return { ...r.rows[0], hasSecret: Boolean(tool.secret) };
   }
 
   async updateTool(tenantId: string, id: string, patch: Partial<Pick<StoredTool, 'status' | 'approvalMode' | 'risk' | 'name' | 'description'>>): Promise<StoredTool> {
@@ -92,7 +109,7 @@ export class DatabaseService implements OnModuleDestroy {
     if (patch.name !== undefined) { sets.push(`name=$${vals.push(patch.name)}`); }
     if (patch.description !== undefined) { sets.push(`descriptor=jsonb_set(descriptor,'{description}',$${vals.push(JSON.stringify(patch.description))}::jsonb)`); }
     if (sets.length === 0) throw new Error('No fields to update.');
-    const r = await this.pool.query(
+    const r = await this.query(tenantId, 
       `update public.tools set ${sets.join(',')}
        where tenant_id=$1 and id=$2::uuid
        returning id::text, name, slug, kind, scopes, risk,
@@ -104,9 +121,16 @@ export class DatabaseService implements OnModuleDestroy {
     return r.rows[0];
   }
 
+  /** Server-side only: decrypted secret for connector execution. Never returned by the API. */
+  async getToolSecret(tenantId: string, id: string): Promise<string | undefined> {
+    if (!this.pool) return undefined;
+    const r = await this.query(tenantId, "select descriptor->>'secretEnc' enc from public.tools where tenant_id=$1 and id=$2::uuid", [tenantId, id]);
+    return r.rows[0]?.enc ? decryptSecret(r.rows[0].enc) : undefined;
+  }
+
   async deleteTool(tenantId: string, id: string): Promise<void> {
     if (!this.pool) throw new Error('Database is not configured.');
-    await this.pool.query('delete from public.tools where tenant_id=$1 and id=$2::uuid', [tenantId, id]);
+    await this.query(tenantId, 'delete from public.tools where tenant_id=$1 and id=$2::uuid', [tenantId, id]);
   }
 
   // ── Audit logs ───────────────────────────────────────────────────────────
@@ -116,7 +140,7 @@ export class DatabaseService implements OnModuleDestroy {
     // Graceful no-op if migration 4 hasn't been applied yet
     try { await this.pool.query('select trace_id from public.audit_logs limit 0'); }
     catch { return { ...trace, id: crypto.randomUUID() }; }
-    const r = await this.pool.query(
+    const r = await this.query(tenantId, 
       `insert into public.audit_logs
          (tenant_id, actor_id, tool_id, tool_name, trace_id, actor_name, actor_client,
           input_summary, decision, policy_reason, execution_status, latency_ms, provider, input, created_at)
@@ -146,14 +170,14 @@ export class DatabaseService implements OnModuleDestroy {
     if (patch.output !== undefined) sets.push(`output=$${vals.push(JSON.stringify(patch.output))}::jsonb`);
     if (patch.error !== undefined) sets.push(`error=$${vals.push(patch.error)}`);
     if (sets.length === 0) return;
-    await this.pool.query(`update public.audit_logs set ${sets.join(',')} where trace_id=$1 and tenant_id=$2`, vals);
+    await this.query(tenantId, `update public.audit_logs set ${sets.join(',')} where trace_id=$1 and tenant_id=$2`, vals);
   }
 
   async listAuditLogs(tenantId: string, limit = 50, offset = 0): Promise<StoredTrace[]> {
     if (!this.pool) return [];
     try { await this.pool.query('select trace_id from public.audit_logs limit 0'); }
     catch { return []; }
-    const r = await this.pool.query(
+    const r = await this.query(tenantId, 
       `select id::text, trace_id "traceId", tool_name "toolName",
               actor_name "actorName", actor_client "actorClient",
               input_summary "inputSummary", decision, policy_reason "policyReason",
@@ -175,7 +199,7 @@ export class DatabaseService implements OnModuleDestroy {
     // Graceful no-op if migration 4 hasn't been applied yet
     try { await this.pool.query('select trace_id from public.approval_requests limit 0'); }
     catch { return { ...approval, id: crypto.randomUUID() }; }
-    const r = await this.pool.query(
+    const r = await this.query(tenantId, 
       `insert into public.approval_requests
          (tenant_id, tool_id, tool_name, trace_id, actor_name, actor_client,
           input_summary, policy_reason, status, execution_status, created_at, input)
@@ -193,11 +217,11 @@ export class DatabaseService implements OnModuleDestroy {
     return { ...r.rows[0], tenantId };
   }
 
-  async updateApproval(tenantId: string, id: string, patch: { status: string; executionStatus: string; approvedBy: string }): Promise<StoredApproval> {
+  async updateApproval(tenantId: string, id: string, patch: { status: string; executionStatus: string; approvedBy?: string }): Promise<StoredApproval> {
     if (!this.pool) throw new Error('Database is not configured.');
-    const r = await this.pool.query(
+    const r = await this.query(tenantId, 
       `update public.approval_requests
-       set status=$2, execution_status=$3, approved_by=$4
+       set status=$2, execution_status=$3, approved_by=coalesce($4, approved_by)
        where id=$1::uuid and tenant_id=$5
        returning id::text, trace_id "traceId", tool_id::text "toolId", tool_name "toolName",
                  actor_name "actorName", actor_client "actorClient",
@@ -205,7 +229,7 @@ export class DatabaseService implements OnModuleDestroy {
                  status, execution_status "executionStatus",
                  created_at::text "createdAt", approved_by "approvedBy",
                  tenant_id::text "tenantId", input`,
-      [id, patch.status, patch.executionStatus, patch.approvedBy, tenantId],
+      [id, patch.status, patch.executionStatus, patch.approvedBy ?? null, tenantId],
     );
     if (!r.rows[0]) throw new Error('Approval not found.');
     return r.rows[0];
@@ -213,7 +237,7 @@ export class DatabaseService implements OnModuleDestroy {
 
   async getApprovalInput(tenantId: string, id: string): Promise<Record<string, unknown>> {
     if (!this.pool) return {};
-    const r = await this.pool.query('select input from public.approval_requests where id=$1::uuid and tenant_id=$2', [id, tenantId]);
+    const r = await this.query(tenantId, 'select input from public.approval_requests where id=$1::uuid and tenant_id=$2', [id, tenantId]);
     return r.rows[0]?.input ?? {};
   }
 
@@ -221,7 +245,7 @@ export class DatabaseService implements OnModuleDestroy {
     if (!this.pool) return [];
     try { await this.pool.query('select trace_id from public.approval_requests limit 0'); }
     catch { return []; }
-    const r = await this.pool.query(
+    const r = await this.query(tenantId, 
       `select id::text, trace_id "traceId", tool_id::text "toolId", tool_name "toolName",
               actor_name "actorName", actor_client "actorClient",
               input_summary "inputSummary", policy_reason "policyReason",

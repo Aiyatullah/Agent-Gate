@@ -1,7 +1,12 @@
-import { ConflictException, ForbiddenException, HttpException, HttpStatus, Injectable, NotFoundException, Optional } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, HttpException, HttpStatus, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { DatabaseService, StoredTool, StoredTrace, StoredApproval } from './database.service.js';
-import { ExecutionService, log } from './execution.service.js';
-import type { ConnectorResult } from './connector.service.js';
+import { ExecutionService, ExecJob } from './execution.service.js';
+import { ConnectorService, ConnectorResult } from './connector.service.js';
+import { RateLimitService } from './rate-limit.service.js';
+import { MetricsService } from './metrics.service.js';
+import { log } from './log.js';
+import { ProviderService } from './provider.service.js';
+import { AuthService } from './auth.service.js';
 
 export type Role = 'admin' | 'agent' | 'viewer';
 export type Tool = StoredTool;
@@ -25,15 +30,24 @@ export class AppService {
   // In-memory fallback used when DATABASE_URL is not set
   private readonly memTraces: StoredTrace[] = [];
   private readonly memApprovals: StoredApproval[] = [];
-  private readonly requests = new Map<string, number[]>();
 
-  constructor(@Optional() private readonly db?: DatabaseService, @Optional() private readonly exec?: ExecutionService) {}
+  constructor(
+    @Optional() private readonly db?: DatabaseService,
+    @Optional() private readonly exec?: ExecutionService,
+    @Optional() private readonly rate?: RateLimitService,
+    @Optional() private readonly connector?: ConnectorService,
+    @Optional() private readonly metrics?: MetricsService,
+    @Optional() private readonly providers?: ProviderService,
+    @Optional() private readonly authSvc?: AuthService,
+  ) {
+    this.exec?.bind({ run: j => this.runJob(j), done: (j, r) => this.finish(j.tenantId, j.approvalId, j.traceId, r) });
+  }
 
   health() { return { status: 'ok', service: 'agent-gate', at: new Date().toISOString() }; }
 
   // ── Tools ────────────────────────────────────────────────────────────────
 
-  async rawTools(a: Actor) {
+  async rawTools(a: Pick<Actor, 'tenantId'>) {
     if (!this.db?.enabled) return fallbackTools;
     const t = await this.db.listTools(a.tenantId);
     return t.length ? t : fallbackTools;
@@ -49,6 +63,10 @@ export class AppService {
   async createTool(a: Actor, input: Omit<Tool, 'id'>) {
     if (a.role !== 'admin') throw new ForbiddenException('Only tenant admins can register tools.');
     if (!this.db?.enabled) throw new HttpException('Database is required to register tools.', HttpStatus.SERVICE_UNAVAILABLE);
+    if (input.endpoint && this.connector) {
+      try { await this.connector.validateEndpoint(input.endpoint); } catch (e) { throw new BadRequestException((e as Error).message); }
+    }
+    if (input.secret && !process.env.SECRETS_KEY) throw new BadRequestException('SECRETS_KEY must be configured to store tool secrets.');
     const tool = await this.db.createTool(a.tenantId, input);
     await this.trace(a, tool, 'tool_registered', 'Tool configuration saved.', {}, 'completed', 0);
     return tool;
@@ -84,15 +102,28 @@ export class AppService {
 
   // ── Users (in-memory seed) ───────────────────────────────────────────────
 
-  listUsers(a: Actor) {
+  async listUsers(a: Actor) {
     if (a.role !== 'admin') throw new ForbiddenException('Only tenant admins can list identities.');
-    return seedUsers;
+    if (!this.authSvc) return seedUsers;
+    const real = await this.authSvc.listUsers(a.tenantId);
+    return real.length ? real : seedUsers;
+  }
+
+  async setUserRole(a: Actor, userId: string, role: Role) {
+    if (a.role !== 'admin') throw new ForbiddenException('Only tenant admins can assign access.');
+    if (!['admin', 'agent', 'viewer'].includes(role)) throw new BadRequestException('Role must be admin, agent, or viewer.');
+    if (userId === a.sub && role !== 'admin') throw new BadRequestException('You cannot remove your own admin access.');
+    const r = await this.authSvc?.setRole(a.tenantId, userId, role);
+    if (!r) throw new NotFoundException('User was not found in this tenant.');
+    log('info', 'role_assigned', { tenantId: a.tenantId, userId, role });
+    return r;
   }
 
   // ── Tool invocation ──────────────────────────────────────────────────────
 
   async invoke(a: Actor, toolId: string, input: Input = {}) {
-    this.limit(a);
+    await this.rate?.check(a.tenantId, a.sub);
+    this.metrics?.inc('agent_gate_tool_calls_total');
     const t = (await this.rawTools(a)).find(x => x.id === toolId || x.slug === toolId);
     if (!t) throw new NotFoundException('Tool is not registered for this tenant');
 
@@ -126,7 +157,7 @@ export class AppService {
     }
 
     const started = Date.now();
-    const r = this.exec ? await this.runNow(t, input) : undefined;
+    const r = this.connector ? await this.runNow(a.tenantId, t, input) : undefined;
     const ok = r ? r.ok : true;
     const tr = await this.trace(a, t, ok ? 'allowed' : 'failed', ok ? 'Tool scope and active policy passed.' : `Execution failed: ${r?.error}`, input, ok ? 'completed' : 'failed', Date.now() - started, r?.simulated === false ? 'connector' : 'mock-primary', r?.output);
     log('info', 'tool_invoked', { tenantId: a.tenantId, tool: t.slug, decision: tr.decision, traceId: tr.traceId });
@@ -167,48 +198,62 @@ export class AppService {
   /** Queues an approved call on the execution worker; status moves to completed/failed asynchronously. */
   private async dispatch(a: Actor, x: StoredApproval, useDb: boolean) {
     if (!this.exec) return;
-    const tool = (await this.rawTools(a)).find(t => t.id === x.toolId);
-    if (!tool) { await this.finish(a, x, useDb, { ok: false, error: 'Tool no longer exists.', attempts: 0 }); return; }
     const input = x.input ?? (useDb ? await this.db!.getApprovalInput(a.tenantId, x.id) : {});
-    this.exec.enqueue({ tool, input, done: r => this.finish(a, x, useDb, r) });
+    await this.exec.enqueue({ tenantId: a.tenantId, approvalId: x.id, traceId: x.traceId, toolId: x.toolId, input });
   }
 
-  private async finish(a: Actor, x: StoredApproval, useDb: boolean, r: ConnectorResult) {
+  private async toolWithSecret(tenantId: string, toolId: string) {
+    const tool = (await this.rawTools({ tenantId })).find(t => t.id === toolId);
+    if (!tool) return {};
+    const secret = this.db?.enabled && tool.hasSecret ? await this.db.getToolSecret(tenantId, tool.id) : undefined;
+    return { tool, secret };
+  }
+
+  private async runJob(j: ExecJob): Promise<ConnectorResult> {
+    const { tool, secret } = await this.toolWithSecret(j.tenantId, j.toolId);
+    if (!tool) return { ok: false, error: 'Tool no longer exists.', attempts: 0 };
+    return this.connector!.execute(tool, j.input, secret);
+  }
+
+  private async finish(tenantId: string, approvalId: string, traceId: string, r: ConnectorResult) {
     const executionStatus = r.ok ? 'completed' : 'failed';
-    x.executionStatus = executionStatus;
     const policyReason = r.ok ? 'Approved and executed.' : `Approved but execution failed: ${r.error}`;
-    if (useDb) {
-      await this.db!.updateApproval(a.tenantId, x.id, { status: 'approved', executionStatus, approvedBy: x.approvedBy ?? 'Tenant Admin' });
-      await this.db!.updateAuditLog(a.tenantId, x.traceId, { executionStatus, policyReason, output: r.output, error: r.error });
+    if (this.db && await this.db.migration4Ready()) {
+      await this.db.updateApproval(tenantId, approvalId, { status: 'approved', executionStatus });
+      await this.db.updateAuditLog(tenantId, traceId, { executionStatus, policyReason, output: r.output, error: r.error });
     } else {
-      const trace = this.memTraces.find(t => t.traceId === x.traceId);
+      const x = this.memApprovals.find(i => i.id === approvalId && i.tenantId === tenantId);
+      if (x) x.executionStatus = executionStatus;
+      const trace = this.memTraces.find(t => t.traceId === traceId);
       if (trace) Object.assign(trace, { executionStatus, policyReason, output: r.output });
     }
-    log(r.ok ? 'info' : 'error', 'execution_finished', { tenantId: a.tenantId, approvalId: x.id, executionStatus, attempts: r.attempts, error: r.error });
+    this.metrics?.inc('agent_gate_executions_total', { status: executionStatus });
+    log(r.ok ? 'info' : 'error', 'execution_finished', { tenantId, approvalId, executionStatus, attempts: r.attempts, error: r.error });
   }
 
-  private async runNow(t: Tool, input: Input): Promise<ConnectorResult & { simulated?: boolean }> {
-    const done = new Promise<ConnectorResult>(res => this.exec!.enqueue({ tool: t, input, done: res }));
-    const r = await done;
+  private async runNow(tenantId: string, t: Tool, input: Input): Promise<ConnectorResult> {
+    const secret = this.db?.enabled && t.hasSecret ? await this.db.getToolSecret(tenantId, t.id) : undefined;
+    const r = await this.connector!.execute(t, input, secret);
     return { ...r, simulated: r.simulated ?? false };
   }
 
   // ── Replay ───────────────────────────────────────────────────────────────
 
   /**
-   * Safe replay: re-evaluates the recorded policy decision only. Tools are never
-   * re-executed, so side-effecting calls cannot fire twice.
+   * Safe replay/evaluation: asks one or more providers to review the recorded policy decision using
+   * only sanitized trace metadata. Tools are never re-executed and raw input is never sent.
    */
-  async replay(a: Actor, id: string) {
+  async replay(a: Actor, id: string, opts: { providers?: string[]; prompt?: string } = {}) {
     const trace = (await this.listAudit(a, 200)).find(x => x.id === id);
     if (!trace) throw new NotFoundException('Trace was not found.');
+    const prompt = `${opts.prompt?.slice(0, 500) ?? 'Review this AI-agent tool policy decision and say whether it looks correct.'}\n` +
+      `Tool: ${trace.toolName}\nDecision: ${trace.decision}\nReason: ${trace.policyReason}\nInput summary: ${trace.inputSummary}`;
+    const names = opts.providers?.length ? opts.providers : this.providers?.available() ?? ['mock-primary', 'mock-fallback'];
+    const results = this.providers ? await Promise.all(names.map(n => this.providers!.run(n, prompt))) : [];
     return {
       traceId: trace.traceId, toolName: trace.toolName, sideEffectsReplayed: false,
       original: { decision: trace.decision, executionStatus: trace.executionStatus, provider: trace.provider ?? null, latencyMs: trace.latencyMs, output: trace.output ?? null },
-      comparison: [
-        { provider: trace.provider ?? 'mock-primary', result: trace.decision, latencyMs: trace.latencyMs, costUsd: 0.0002 },
-        { provider: 'mock-fallback', result: trace.decision, latencyMs: trace.latencyMs + 7, costUsd: 0.0001 },
-      ],
+      comparison: results.map(r => ({ provider: r.provider, result: r.ok ? r.text : `error: ${r.error}`, latencyMs: r.latencyMs, inputTokens: r.inputTokens, outputTokens: r.outputTokens, costUsd: r.costUsd })),
     };
   }
 
@@ -241,13 +286,5 @@ export class AppService {
       .slice(0, 3)
       .map(([k, v]) => `${k}: ${String(v).replace(/\s+/g, ' ').slice(0, 90)}`);
     return pairs.length ? pairs.join(' · ') : 'No arguments';
-  }
-
-  private limit(a: Actor) {
-    const now = Date.now(), key = `${a.tenantId}:${a.sub}`;
-    const prior = (this.requests.get(key) ?? []).filter(t => t > now - 60000);
-    if (prior.length >= 30) throw new HttpException('Tenant agent limit: 30 tool calls/minute.', HttpStatus.TOO_MANY_REQUESTS);
-    prior.push(now);
-    this.requests.set(key, prior);
   }
 }
