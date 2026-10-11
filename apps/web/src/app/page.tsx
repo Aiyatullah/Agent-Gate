@@ -38,14 +38,37 @@ export default function Home() {
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
 
+  const [needLogin, setNeedLogin] = useState(false);
+  const [authMode, setAuthMode] = useState<'in' | 'up'>('in');
+  const stored = () => { try { return localStorage.getItem('ag_token'); } catch { return null; } };
+
+  const signOut = () => { try { localStorage.removeItem('ag_token'); } catch { /* ignore */ } setNeedLogin(true); setTools([]); setAudit([]); setApprovals([]); setUsers([]); };
+
+  const submitAuth = async (e: FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const f = new FormData(e.currentTarget);
+    const r = await fetch(`${API}/api/auth/sign-${authMode === 'in' ? 'in' : 'up'}/email`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: f.get('email'), password: f.get('password'), name: f.get('name') || String(f.get('email')).split('@')[0] }),
+    });
+    const t = r.headers.get('set-auth-token');
+    if (!r.ok || !t) { setNotice((await r.json().catch(() => ({}))).message ?? 'Sign-in failed'); return; }
+    try { localStorage.setItem('ag_token', t); } catch { /* ignore */ }
+    setNotice(''); setNeedLogin(false); await load();
+  };
+
   const token = async () => {
+    const saved = stored();
+    if (saved) return saved;
     const r = await fetch(`${API}/auth/demo-token`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ role: 'admin' }) });
+    if (!r.ok) { setNeedLogin(true); throw Error('Please sign in.'); }
     return (await r.json()).accessToken as string;
   };
 
   const req = async (path: string, method = 'GET', body?: unknown) => {
     const t = await token();
     const r = await fetch(`${API}${path}`, { method, headers: { Authorization: `Bearer ${t}`, 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+    if (r.status === 401) { try { localStorage.removeItem('ag_token'); } catch { /* ignore */ } setNeedLogin(true); }
     if (!r.ok) throw Error((await r.json()).message ?? 'Request failed');
     return r.json();
   };
@@ -95,7 +118,7 @@ export default function Home() {
     const name = String(f.get('name'));
     const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
     try {
-      await req('/tools', 'POST', { name, slug, kind: f.get('kind'), description: f.get('description'), scopes: String(f.get('scopes')).split(',').map(x => x.trim()).filter(Boolean), risk: f.get('risk'), status: f.get('status'), approvalMode: f.get('approvalMode'), endpoint: f.get('endpoint') || undefined });
+      await req('/tools', 'POST', { name, slug, kind: f.get('kind'), description: f.get('description'), scopes: String(f.get('scopes')).split(',').map(x => x.trim()).filter(Boolean), risk: f.get('risk'), status: f.get('status'), approvalMode: f.get('approvalMode'), endpoint: f.get('endpoint') || undefined, secret: f.get('secret') || undefined, inputRequired: String(f.get('inputRequired') ?? '').split(',').map(x => x.trim()).filter(Boolean) });
       setForm(false); setNotice('Tool registered and governed by tenant policy.'); await load();
     } catch (e) { setNotice(e instanceof Error ? e.message : 'Could not register tool'); }
     finally { setBusy(false); }
@@ -135,6 +158,23 @@ export default function Home() {
 
   const pendingCount = approvals.filter(a => a.status === 'pending').length;
 
+  if (needLogin) {
+    return (
+      <main className="mx-auto mt-24 max-w-sm p-6">
+        <form className="panel grid gap-3 p-6" onSubmit={e => void submitAuth(e)}>
+          <h1 className="editorial text-3xl">Agent Gate</h1>
+          <p className="text-sm" style={{ color: 'var(--text-2)' }}>{authMode === 'in' ? 'Sign in to your tenant.' : 'Create an account. New accounts start as viewers until an admin assigns access.'}</p>
+          {authMode === 'up' && <label>Name<input name="name" autoComplete="name" /></label>}
+          <label>Email<input required type="email" name="email" autoComplete="email" /></label>
+          <label>Password<input required type="password" name="password" minLength={10} autoComplete={authMode === 'in' ? 'current-password' : 'new-password'} /></label>
+          {notice && <p role="alert" className="text-sm">{notice}</p>}
+          <button className="primary" type="submit">{authMode === 'in' ? 'Sign in' : 'Create account'}</button>
+          <button type="button" className="secondary" onClick={() => { setAuthMode(authMode === 'in' ? 'up' : 'in'); setNotice(''); }}>{authMode === 'in' ? 'Need an account?' : 'Have an account?'}</button>
+        </form>
+      </main>
+    );
+  }
+
   // ── Sections ─────────────────────────────────────────────────────────────
 
   const Overview = (
@@ -153,6 +193,7 @@ export default function Home() {
       <div className="flex items-center justify-between border-b p-5" style={{ borderColor: 'var(--line)' }}>
         <div><p className="text-xl font-semibold">Tool registry</p><p style={{ color: 'var(--text-2)' }}>Register REST or MCP tools, then choose their approval policy.</p></div>
         <button className="primary" onClick={() => setForm(true)}>Register tool</button>
+        {stored() && <button className="secondary ml-2" onClick={signOut}>Sign out</button>}
       </div>
       {tools.length === 0
         ? <Empty msg="No tools registered yet. Register your first tool to get started." />
@@ -342,7 +383,7 @@ export default function Home() {
         <div className="rounded-lg border p-4" style={{ borderColor: 'var(--line)' }}>
           <p className="font-semibold text-sm mb-2">🔜 Target (production)</p>
           <ul className="text-sm space-y-1" style={{ color: 'var(--text-2)' }}>
-            {['Real Supabase Auth login/logout/session', 'BullMQ + Redis execution worker', 'Remote Streamable HTTP MCP endpoint', 'OAuth/API-key per-client identity', 'Real tool connector (proxy + secrets)', 'Real provider adapters (Claude / OpenAI)', 'Replay harness (safe, no side effects)', 'Full multi-tenant RLS enforcement', 'Monitoring, alerts, structured logs', 'Deployment config + secret management'].map(f => <li key={f}>· {f}</li>)}
+            {['Hosted deploy with managed Redis + Postgres', 'Alerting rules on /metrics', 'Per-user API-key management UI'].map(f => <li key={f}>· {f}</li>)}
           </ul>
         </div>
       </div>
@@ -433,6 +474,8 @@ export default function Home() {
                 <label>Risk<select name="risk"><option value="high">High</option><option value="low">Low</option></select></label>
               </div>
               <label>Endpoint or MCP URL / command<input name="endpoint" placeholder="https://example.com/mcp" /></label>
+              <label>Bearer secret (stored encrypted, never shown again)<input name="secret" type="password" autoComplete="off" /></label>
+              <label>Required input fields (comma separated)<input name="inputRequired" placeholder="to, subject" /></label>
               <label>Required scopes<input required name="scopes" defaultValue="tools:custom:use" /></label>
               <div className="grid grid-cols-2 gap-3">
                 <label>Status<select name="status"><option value="draft">Draft</option><option value="active">Active</option><option value="disabled">Disabled</option></select></label>

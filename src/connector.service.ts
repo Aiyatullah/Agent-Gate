@@ -40,7 +40,7 @@ export class ConnectorService {
     if (missing.length) throw new Error(`Missing required input: ${missing.join(', ')}`);
   }
 
-  async execute(tool: StoredTool, input: Record<string, unknown>): Promise<ConnectorResult> {
+  async execute(tool: StoredTool, input: Record<string, unknown>, secret?: string): Promise<ConnectorResult> {
     try { this.validateInput(tool, input); } catch (e) { return { ok: false, error: (e as Error).message, attempts: 0 }; }
     if (!tool.endpoint) return { ok: true, simulated: true, attempts: 0, output: { tool: tool.name, note: 'No endpoint configured; governed dry-run.' } };
     let url: URL;
@@ -51,7 +51,7 @@ export class ConnectorService {
       try {
         const res = await fetch(url, {
           method: 'POST', redirect: 'error',
-          headers: { 'content-type': 'application/json' },
+          headers: { 'content-type': 'application/json', ...(secret ? { authorization: `Bearer ${secret}` } : {}) },
           body: JSON.stringify(input), signal: AbortSignal.timeout(TIMEOUT_MS),
         });
         if (res.ok) return { ok: true, attempts: attempt, output: await res.json().catch(() => ({ status: res.status })) };

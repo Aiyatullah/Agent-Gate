@@ -34,56 +34,46 @@ Migration file written (`202610110004_persist_operations.sql`). `DatabaseService
 `listApprovals`. `AppService` routes to DB when `migration4Ready()` returns true (columns
 present), otherwise uses in-memory. **Run the migration to activate full persistence.**
 
-### 2. Real authentication/login  
-The dashboard issues demo JWTs. Build real Supabase Auth login, logout, session handling,
-tenant membership, and admin/agent/viewer access assignment.
+### 2. ✅ Real authentication/login (Better Auth)
+Email/password sign-up/sign-in at `/api/auth/*`, bearer session tokens, dashboard login screen.
+Roles are server-assigned (`ADMIN_EMAILS` bootstrap, everyone else `viewer`); admins assign access with
+`PATCH /users/:id/role`. Tables are auto-created in Postgres on boot (`AUTH_AUTO_MIGRATE=false` to disable);
+without `DATABASE_URL` it uses Better Auth's in-memory store. Demo JWTs are off by default in production.
 
-### 3. ✅ Real execution worker (in-process)
-`ExecutionService` queues approved calls and runs them through `ConnectorService`; records move
-`approved_pending_execution` → `completed` / `failed` (output + error saved to `audit_logs`).
-Tools without an endpoint stay governed dry-runs. Remaining: swap the in-process queue for
-BullMQ so jobs survive restarts (see item 4). Requires migration `202610110005_execution_worker.sql`.
+### 3. ✅ Real execution worker
+Approved calls run through the connector and move to `completed` / `failed`. Uses BullMQ when `REDIS_URL` is set
+(durable, retried with backoff, multi-instance), otherwise an in-process queue.
 
-### 4. Redis + BullMQ  
-Current rate limiting is in memory. Redis should own distributed rate limits,
-approval/execution jobs, retries, and failure handling.
+### 4. ✅ Redis + BullMQ
+`REDIS_URL` enables distributed rate limits (`RATE_LIMIT_PER_MINUTE`) and the BullMQ execution queue. Unset or
+unreachable Redis falls back to in-memory. Verified against a live Redis (`src/redis.integration.spec.ts`, CI service).
 
-### 5. Real remote MCP endpoint  
-Current Claude setup uses local `npx tsx mcp/server.ts` over stdio. For production, expose
-a secured Streamable HTTP MCP route:
-`https://api.yourdomain.com/mcp`  
-Needs per-client authentication (OAuth/API keys/service identities) and must map each
-caller to a tenant, role, and scopes.
+### 5. ✅ Remote MCP endpoint
+`POST /mcp` (Streamable HTTP, stateless). Per-client API keys from `MCP_CLIENTS` map to tenant/role/scopes; set
+`MCP_PUBLIC_URL` for the public address. See `docs/mcp-clients.md`. Not implemented: OAuth flow for MCP clients.
 
-### 6. ✅ Connect registered tools to real targets (partial)
-Done: https-only endpoints, `OUTBOUND_ALLOWLIST` host allowlist, private-IP/SSRF block, no
-redirects, timeout + retry with backoff (`CONNECTOR_TIMEOUT_MS`, `CONNECTOR_MAX_ATTEMPTS`),
-required-input validation. Pending: encrypted per-tool secrets.
+### 6. ✅ Connect registered tools to real targets
+https-only, host allowlist, SSRF block, timeouts/retries, input validation, and per-tool secrets encrypted with
+AES-256-GCM (`SECRETS_KEY`), sent as a Bearer header and never returned by the API.
 
-### 7. Provider fallback  
-Current provider/replay output is mock data. Add real Claude/OpenAI provider adapters,
-fallback behavior, token/cost capture, and provider selection in traces.
+### 7. ✅ Provider adapters
+Anthropic and OpenAI adapters with ordered fallback (`PROVIDER_ORDER`), token + cost capture. Mock providers when
+no API keys are set. Used by replay. Not live-tested here (no API keys in this environment).
 
-### 8. Replay/evaluation harness (partial)
-Replay now returns the saved original decision/output and never re-executes tools
-(`sideEffectsReplayed: false`). Pending: real provider comparison (item 7).
+### 8. ✅ Replay/evaluation harness
+`POST /audit-logs/:id/replay` `{providers?, prompt?}` sends only sanitized trace metadata to each provider and
+never re-executes tools.
 
-### 9. Complete multi-tenant enforcement (partial)
-Fixed: approval decisions and audit updates are now tenant-scoped in SQL (previously an admin
-of another tenant could decide by id), and decisions are single-shot (409 on repeat).
-Pending: per-request RLS context and membership lookup (depends on item 2).
+### 9. ✅ Multi-tenant enforcement
+Tenant-scoped SQL everywhere, plus optional database-enforced RLS (`DB_RLS=true` runs each query as role
+`authenticated` with `app.tenant_id` set). Not tested against Supabase here; enable in staging first.
 
-### 10. ✅ Production polish (partial)  
-- ✅ Edit/disable/delete tool workflow  
-- ✅ Search/filter/pagination for traces (search done; pagination pending)  
-- ✅ Error states and empty states  
-- ✅ Audit export (CSV)  
-- ✅ Architecture diagram and write-up  
-- ✅ Pagination for audit logs (`GET /audit-logs?limit=&offset=`)
-- ✅ Unit + e2e tests (13 unit, 4 e2e) covering policy, approvals, tenant isolation, connector
-- ✅ Structured JSON logs for invocations, approvals, and executions
-- Deployment configuration and secret management — pending
-- Monitoring/alerts — pending
+### 10. Production polish
+- ✅ Edit/disable/delete, search, pagination, CSV export, empty/error states, architecture diagram
+- ✅ Unit, e2e, and Redis integration tests; CI runs them with a Redis service
+- ✅ Structured JSON logs; `GET /metrics` (Prometheus text, optional `METRICS_TOKEN`)
+- ✅ docker-compose with Redis, healthchecks, restart policy
+- Pending: hosted deployment, alert rules on `/metrics`, API-key management UI
 
 ---
 
@@ -91,9 +81,9 @@ Pending: per-request RLS context and membership lookup (depends on item 2).
 
 | | Current | Target |
 |---|---|---|
-| MCP transport | stdio (local `npx tsx`) | Streamable HTTP, per-client auth |
-| Auth | demo JWTs | Supabase Auth (real login/logout) |
+| MCP transport | stdio + Streamable HTTP with API keys | + OAuth |
+| Auth | Better Auth sessions (demo JWTs dev-only) | + OAuth/SSO |
 | Approvals/audit | in-memory (persisted to DB once migration 4 is applied) | always Supabase, multi-tenant RLS |
-| Execution | in-process worker + guarded connector | BullMQ worker, encrypted secrets |
-| Rate limiting | in-memory per-process | Redis distributed |
+| Execution | BullMQ (Redis) or in-process + guarded connector, encrypted secrets | — |
+| Rate limiting | Redis when `REDIS_URL` set, else in-memory | — |
 | Tools | allowlisted REST proxy | + encrypted secrets |
