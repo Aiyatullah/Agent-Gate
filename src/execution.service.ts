@@ -59,6 +59,14 @@ export class ExecutionService implements OnModuleDestroy {
     void this.drain();
   }
 
+  async counts(): Promise<{ waiting: number; failed: number }> {
+    if (this.queue && this.redis.enabled) {
+      const c = await this.queue.getJobCounts('waiting', 'delayed', 'failed');
+      return { waiting: (c.waiting ?? 0) + (c.delayed ?? 0), failed: c.failed ?? 0 };
+    }
+    return { waiting: this.local.length, failed: 0 };
+  }
+
   get mode() { return this.queue && this.redis.enabled ? 'bullmq' : 'in-process'; }
 
   /** Resolves when the in-process queue is empty (tests / graceful shutdown). */

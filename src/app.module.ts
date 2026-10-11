@@ -11,11 +11,13 @@ import { RedisService } from './redis.service.js';
 import { RateLimitService } from './rate-limit.service.js';
 import { MetricsService } from './metrics.service.js';
 import { ProviderService } from './provider.service.js';
+import { ApiKeysService } from './api-keys.service.js';
+import { MonitoringService } from './monitoring.service.js';
 import { McpHttpController } from './mcp-http.controller.js';
 
 @Module({
   imports: [ConfigModule.forRoot({ isGlobal: true }), JwtModule.register({ secret: process.env.JWT_SECRET ?? 'local-development-secret-change-me', signOptions: { expiresIn: '1h' } })],
   controllers: [AppController, McpHttpController],
-  providers: [AppService, DatabaseService, ConnectorService, ExecutionService, AuthService, RedisService, RateLimitService, MetricsService, ProviderService],
+  providers: [AppService, DatabaseService, ConnectorService, ExecutionService, AuthService, RedisService, RateLimitService, MetricsService, ProviderService, ApiKeysService, MonitoringService],
 })
 export class AppModule {}

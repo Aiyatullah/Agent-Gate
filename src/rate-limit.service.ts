@@ -1,5 +1,6 @@
 import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
 import { RedisService } from './redis.service.js';
+import { MetricsService } from './metrics.service.js';
 
 const LIMIT = Number(process.env.RATE_LIMIT_PER_MINUTE ?? 30);
 
@@ -8,7 +9,7 @@ const LIMIT = Number(process.env.RATE_LIMIT_PER_MINUTE ?? 30);
 export class RateLimitService {
   private readonly mem = new Map<string, number[]>();
 
-  constructor(private readonly redis: RedisService) {}
+  constructor(private readonly redis: RedisService, private readonly metrics?: MetricsService) {}
 
   async check(tenantId: string, actorId: string) {
     const key = `${tenantId}:${actorId}`;
@@ -29,6 +30,7 @@ export class RateLimitService {
   }
 
   private reject(): never {
+    this.metrics?.inc('agent_gate_rate_limited_total');
     throw new HttpException(`Tenant agent limit: ${LIMIT} tool calls/minute.`, HttpStatus.TOO_MANY_REQUESTS);
   }
 }

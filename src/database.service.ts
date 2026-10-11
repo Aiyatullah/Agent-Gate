@@ -17,6 +17,11 @@ export type StoredTrace = {
   input?: Record<string, unknown>; output?: unknown;
 };
 
+export type StoredApiKey = {
+  id: string; tenantId: string; name: string; prefix: string; role: 'agent' | 'viewer'; scopes: string[];
+  createdBy: string; createdAt: string; lastUsedAt?: string | null; revokedAt?: string | null;
+};
+
 export type StoredApproval = {
   id: string; traceId: string; tenantId: string; toolId: string; toolName: string;
   actorName: string; actorClient: string; inputSummary: string; policyReason: string;
@@ -256,6 +261,50 @@ export class DatabaseService implements OnModuleDestroy {
       [tenantId],
     );
     return r.rows.map(row => ({ ...row, tenantId }));
+  }
+
+  /** Cross-tenant operational stats for metrics (no tenant data leaves the process). */
+  async pendingApprovalStats(): Promise<{ count: number; oldestAgeSec: number }> {
+    if (!this.pool || !(await this.migration4Ready())) return { count: 0, oldestAgeSec: 0 };
+    const r = await this.pool.query("select count(*)::int c, coalesce(extract(epoch from now() - min(created_at)),0)::float age from public.approval_requests where status='pending'");
+    return { count: r.rows[0].c, oldestAgeSec: Math.round(r.rows[0].age) };
+  }
+
+  // ── MCP API keys ─────────────────────────────────────────────────────────
+
+  private _keys: boolean | null = null;
+  async apiKeysReady() {
+    if (!this.pool) return false;
+    if (this._keys !== null) return this._keys;
+    try { await this.pool.query('select key_hash from public.mcp_api_keys limit 0'); this._keys = true; } catch { this._keys = false; }
+    return this._keys;
+  }
+
+  async createApiKey(tenantId: string, k: Omit<StoredApiKey, 'id' | 'createdAt' | 'tenantId'> & { keyHash: string }): Promise<StoredApiKey> {
+    const r = await this.query(tenantId, `insert into public.mcp_api_keys (tenant_id,name,key_hash,prefix,role,scopes,created_by)
+       values ($1,$2,$3,$4,$5,$6,$7)
+       returning id::text, name, prefix, role, scopes, created_by "createdBy", created_at::text "createdAt", last_used_at::text "lastUsedAt", revoked_at::text "revokedAt"`,
+      [tenantId, k.name, k.keyHash, k.prefix, k.role, k.scopes, k.createdBy]);
+    return { ...r.rows[0], tenantId };
+  }
+
+  async listApiKeys(tenantId: string): Promise<StoredApiKey[]> {
+    const r = await this.query(tenantId, `select id::text, name, prefix, role, scopes, created_by "createdBy", created_at::text "createdAt",
+       last_used_at::text "lastUsedAt", revoked_at::text "revokedAt" from public.mcp_api_keys where tenant_id=$1 order by created_at desc`, [tenantId]);
+    return r.rows.map(row => ({ ...row, tenantId }));
+  }
+
+  async revokeApiKey(tenantId: string, id: string): Promise<boolean> {
+    const r = await this.query(tenantId, 'update public.mcp_api_keys set revoked_at=now() where tenant_id=$1 and id=$2::uuid and revoked_at is null', [tenantId, id]);
+    return (r.rowCount ?? 0) > 0;
+  }
+
+  /** Auth-path lookup by hash. Runs before a tenant is known, so it uses the pool directly. */
+  async findApiKeyByHash(keyHash: string): Promise<StoredApiKey | undefined> {
+    if (!this.pool) return undefined;
+    const r = await this.pool.query(`update public.mcp_api_keys set last_used_at=now() where key_hash=$1 and revoked_at is null
+       returning id::text, tenant_id::text "tenantId", name, prefix, role, scopes, created_by "createdBy", created_at::text "createdAt"`, [keyHash]);
+    return r.rows[0];
   }
 
   async onModuleDestroy() { await this.pool?.end(); }

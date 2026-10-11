@@ -85,6 +85,14 @@ export class AppService {
     return { deleted: true };
   }
 
+  /** Pending approvals across all tenants, for metrics only. */
+  async pendingStats() {
+    if (this.db && await this.db.migration4Ready()) return this.db.pendingApprovalStats();
+    const p = this.memApprovals.filter(x => x.status === 'pending');
+    const oldest = p.length ? Math.min(...p.map(x => Date.parse(x.createdAt))) : Date.now();
+    return { count: p.length, oldestAgeSec: Math.round((Date.now() - oldest) / 1000) };
+  }
+
   // ── Audit logs ───────────────────────────────────────────────────────────
 
   async listAudit(a: Actor, limit = 50, offset = 0) {
@@ -260,6 +268,7 @@ export class AppService {
   // ── Internal helpers ─────────────────────────────────────────────────────
 
   private async trace(a: Actor, t: Tool, decision: string, policyReason: string, input: Input, executionStatus: string, latencyMs: number, provider?: string, output?: unknown): Promise<StoredTrace> {
+    this.metrics?.inc('agent_gate_tool_decisions_total', { decision });
     const now = new Date().toISOString();
     const tr: Omit<StoredTrace, 'id'> = {
       traceId: `tr_${crypto.randomUUID().replaceAll('-', '').slice(0, 12)}`,

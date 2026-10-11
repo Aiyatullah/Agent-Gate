@@ -22,7 +22,7 @@ See [the one-page architecture write-up](docs/architecture.md). The runtime path
 
 ## Run locally
 
-Prerequisites: Node 22+, npm, and a Postgres/Supabase URL. Copy `.env.example` to `.env` and set `DATABASE_URL` and a long `JWT_SECRET`.
+Prerequisites: Node 22+, npm, and a Postgres/Supabase URL. Copy `.env.example` to `.env` (every variable is documented there) and set at least `DATABASE_URL`, `JWT_SECRET`, `BETTER_AUTH_SECRET` and `ADMIN_EMAILS`. See `whats-left.md` for the full setup and test checklist.
 
 ```powershell
 # API
